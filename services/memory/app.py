@@ -25,6 +25,29 @@ from services.memory.models import (
 )
 from services.memory.promote import append_memory, promote_memory
 from services.memory.search import search_memory
+from services.memory.store import read_entries
+
+
+async def _prewarm_doc_cache(client: EmbeddingClient, agents: list[str]) -> None:
+    """Embed each agent's MEMORY.md entries once at startup so subsequent search
+    calls hit the LRU cache for documents. Runs sequentially to respect the
+    embedding server's max_concurrent=1; bounded by the configured cache size."""
+    for agent in agents:
+        try:
+            entries = read_entries(agent)
+            if not entries:
+                continue
+            # Match the truncation used at query time so prewarm cache keys hit
+            from services.memory.search import DOC_EMBED_CHARS
+
+            texts = [e.text[:DOC_EMBED_CHARS] for e in entries]
+            # Embed in small batches to avoid one-shot huge requests
+            batch_size = 16
+            for i in range(0, len(texts), batch_size):
+                await client.embed(texts[i : i + batch_size])
+        except Exception:
+            # Pre-warm is best-effort; failures shouldn't block startup
+            continue
 
 
 def _truthy(name: str, default: bool = True) -> bool:
@@ -41,8 +64,13 @@ def create_app() -> FastAPI:
     embedding_client = EmbeddingClient() if embedding_enabled else None
     graphiti_client = GraphitiClient() if graphiti_enabled else None
 
+    prewarm_agents_env = os.environ.get("AGENTOS_MEMORY_PREWARM_AGENTS", "")
+    prewarm_agents = [a.strip() for a in prewarm_agents_env.split(",") if a.strip()]
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        if embedding_client and prewarm_agents:
+            await _prewarm_doc_cache(embedding_client, prewarm_agents)
         try:
             yield
         finally:

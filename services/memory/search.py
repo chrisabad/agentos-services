@@ -11,7 +11,9 @@ Embedding and Graphiti steps are best-effort: failures degrade gracefully (keywo
 
 from __future__ import annotations
 
+import asyncio
 import math
+import os
 import re
 from collections.abc import Iterable
 
@@ -21,8 +23,15 @@ from services.memory.models import SearchResult
 from services.memory.store import MemoryEntry, read_entries
 
 KEYWORD_TOKEN = re.compile(r"[A-Za-z0-9_]+")
-KEYWORD_RERANK_TOP_N = 30  # how many keyword hits to embed for rerank
+KEYWORD_RERANK_TOP_N = 10  # how many keyword hits to embed for rerank (bound the latency tail)
+DOC_EMBED_CHARS = 400  # truncation for doc embedding inputs — Gemma-300M is much faster on shorter inputs
 DEFAULT_LIMIT = 10
+EMBED_RERANK_TIMEOUT_S = float(
+    os.environ.get("AGENTOS_MEMORY_EMBED_RERANK_TIMEOUT_S", "1.0")
+)  # per-call cap; on timeout we degrade to keyword-only for that request.
+# Keyword alone hits 100% top-1 on the Phase 0.3 golden set, so the fallback is
+# functionally equivalent for the queries we know about. Bound is to keep p99
+# under control when the sequential :8001 queue spikes.
 
 
 def _tokenize(text: str) -> set[str]:
@@ -79,12 +88,15 @@ async def search_memory(
         ks = _keyword_score(query_tokens, _tokenize(entry.text))
         scored.append((entry, ks, ks))
 
-    # Step 3: embedding rerank on top N keyword hits
+    # Step 3: embedding rerank on top N keyword hits — bounded by a per-call timeout
+    # so a slow embedding-server call can't hold up the whole search response.
     rerank_pool = sorted(scored, key=lambda r: r[1], reverse=True)[:KEYWORD_RERANK_TOP_N]
     if embedding_client and rerank_pool:
         try:
-            inputs = [query] + [e.text[:1200] for e, _, _ in rerank_pool]
-            vectors = await embedding_client.embed(inputs)
+            inputs = [query] + [e.text[:DOC_EMBED_CHARS] for e, _, _ in rerank_pool]
+            vectors = await asyncio.wait_for(
+                embedding_client.embed(inputs), timeout=EMBED_RERANK_TIMEOUT_S
+            )
             if vectors and len(vectors) >= 2:
                 qv = vectors[0]
                 rerank_scores: list[tuple[MemoryEntry, float, float]] = []
@@ -96,21 +108,26 @@ async def search_memory(
                 rerank_ids = {id(t[0]) for t in rerank_pool}
                 non_rerank = [r for r in scored if id(r[0]) not in rerank_ids]
                 scored = non_rerank + rerank_scores
-        except Exception:
-            # Embedding failure → degrade to keyword-only
+        except (TimeoutError, asyncio.TimeoutError, Exception):
+            # Embedding failure or per-call timeout → degrade to keyword-only.
+            # Quality eval (Phase 0.3) showed 100% top-1 hit rate from keyword alone, so
+            # this is a safe fallback under load spikes on the sequential :8001 queue.
             pass
 
     # Sort by blended score
     scored.sort(key=lambda r: r[2], reverse=True)
     md_results = [_to_result(e, s) for e, _, s in scored if s > 0][: max(0, limit)]
 
-    # Step 4: Graphiti supplement (parallel, best-effort)
+    # Step 4: Graphiti supplement (best-effort, bounded — same rationale as embedding).
     if graphiti_client:
         try:
-            facts = await graphiti_client.search(
-                query=query,
-                group_ids=list(graphiti_group_ids) if graphiti_group_ids else None,
-                max_facts=min(5, limit),
+            facts = await asyncio.wait_for(
+                graphiti_client.search(
+                    query=query,
+                    group_ids=list(graphiti_group_ids) if graphiti_group_ids else None,
+                    max_facts=min(5, limit),
+                ),
+                timeout=EMBED_RERANK_TIMEOUT_S,
             )
             for f in facts:
                 md_results.append(
