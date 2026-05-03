@@ -1,0 +1,9 @@
+# CODEOWNERS for agentos-services
+#
+# Per AGE-12363 / AGE-12381:
+# Ellis (AgentOS) is the AGE business's PR gatekeeper. Branch protection on
+# main requires "Require review from Code Owners", so any PR opened by
+# another agent (Axel, Quinn, Reed, Juno) cannot self-merge — Ellis (or human
+# Chris) must approve.
+
+* @ellis-agentos[bot] @chrisabad
