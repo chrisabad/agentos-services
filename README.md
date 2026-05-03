@@ -8,7 +8,7 @@ PRD: `~/.openclaw/workspace/memory/prds/2026-05-02-hermes-native-im-and-juno.md`
 
 | Service | Port | Status |
 |---------|------|--------|
-| Memory  | 8010 | Phase 0.1 — skeleton (`/health` + bearer auth) |
+| Memory  | 8010 | Phase 0 — `/health` + `/memory/{search,append,promote}` with hybrid retrieval (keyword + embedding rerank + Graphiti supplement) |
 | Attention Broker | 8011 | Not started (Phase 1) |
 | Ingestion | 8012 | Not started (Phase 2) |
 
@@ -64,6 +64,39 @@ agentos-services/
   pyproject.toml
   Makefile
   README.md
+```
+
+## Memory Service performance
+
+Phase 0.3 measured the search path with prewarmed cache + 1s embedding-rerank timeout (defaults). On a sequential local Gemma-300M embedding server (`max_concurrent: 1`):
+
+- p50 ~ 400 ms
+- p95 / p99 capped at the 1s embedding timeout (degrades to keyword-only on slow paths)
+- 8/8 quality hits on the curated golden set
+
+The 500 ms p99 target is **not achievable in the synchronous request path** with the current sequential embedding architecture. AGE-12075 tracks moving the rerank to a background task with a side-cache, which should drop p99 below 500 ms.
+
+### Tuning knobs
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `AGENTOS_MEMORY_PREWARM_AGENTS` | (empty) | Comma-separated agent names. On startup, the service embeds each agent's MEMORY.md entries into the LRU cache so subsequent searches hit cache. |
+| `AGENTOS_MEMORY_EMBED_RERANK_TIMEOUT_S` | `1.0` | Per-call cap on the embedding rerank. On timeout, search degrades gracefully to keyword-only. |
+| `AGENTOS_MEMORY_EMBEDDING_ENABLED` | `true` | Set to `0` to disable embedding rerank entirely (keyword-only mode). |
+| `AGENTOS_MEMORY_GRAPHITI_ENABLED` | `true` | Set to `0` to disable the Graphiti supplement. |
+| `AGENTOS_EMBEDDING_QUERY_CACHE_SIZE` | `256` | LRU size for query + document embedding cache. |
+
+## Eval + bench tools
+
+```bash
+# Quality eval against curated golden set
+PAPERCLIP_BOARD_KEY=... .venv/bin/python tools/eval_quality.py
+
+# Latency benchmark
+PAPERCLIP_BOARD_KEY=... .venv/bin/python tools/bench_latency.py --n 100 --warmup 10
+
+# Sustained-rate soak with rolling p50/p99 report
+PAPERCLIP_BOARD_KEY=... .venv/bin/python tools/soak.py --minutes 30 --rps 1.0
 ```
 
 ## Adding a new service
