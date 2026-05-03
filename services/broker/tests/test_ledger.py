@@ -44,7 +44,7 @@ def _new_topic(fp: str = "fp1", **overrides) -> dict:
 
 def test_load_missing_returns_empty(fake_ledger_path):
     led = ledger.load_ledger()
-    assert led == {"version": 1, "topics": {}}
+    assert led == {"version": 1, "topics": {}, "recent_messages": {}}
 
 
 def test_save_and_reload_roundtrip(fake_ledger_path):

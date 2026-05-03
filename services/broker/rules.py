@@ -6,9 +6,11 @@ engine evaluates rules in priority order; the first rule that returns a non-None
 verdict wins. Rules that return None pass; if all rules pass, the default is
 SURFACE.
 
-Rule numbering follows the PRD amendment (2026-04-23). This module ships the
-critical-path subset (R20, R23, R24, R25, R12/R19, R18, R28, plus default
-SURFACE). Remaining rules R01-R39 are tracked under follow-up issue Phase 1.1b.
+The original PRD amendment (2026-04-23) referenced a 39-rule taxonomy whose
+spec was not preserved on disk. The current rule set is grounded in two
+sources: the 8 critical-path rules ported in Phase 1.1, and the 4 hard-block
+content rules migrated from `kaleidoscope-policy/index.js` steps 1-4 (R29-R32,
+Phase 1.1b — see AGE-12132).
 
 Channel resolution (`resolve_channel`) and tier decay (`decay_tier`) are
 also kept here since they're rule-adjacent and used directly by broker.py.
@@ -16,8 +18,9 @@ also kept here since they're rule-adjacent and used directly by broker.py.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 # ── Decision constants ───────────────────────────────────────────────
@@ -191,6 +194,124 @@ def r28_betterstack_non_critical(topic: dict, ctx: dict) -> tuple[str, str] | No
     return None
 
 
+# ── Policy-migration rules (R29-R32) ─────────────────────────────────
+# Migrated from kaleidoscope-policy/index.js steps 1-4 (AGE-12132). These rules
+# inspect message_text in the context dict; when the context has no
+# `message_text`, the rule passes (returns None).
+
+_RAW_ERROR_PATTERNS = (
+    re.compile(r"Error:\s+\w"),
+    re.compile(r"HTTP Error \d{3}"),
+    re.compile(r"ENOENT:"),
+    re.compile(r"Connection refused"),
+    re.compile(r"API route not found"),
+    re.compile(r"Channel is unavailable"),
+    re.compile(r"Traceback \(most recent call last\)"),
+    re.compile(r"SyntaxError:"),
+    re.compile(r"TypeError:"),
+    re.compile(r"^\s*at\s+\w.*:\d+:\d+", re.MULTILINE),
+)
+
+_BARE_TICKET_RE = re.compile(r"^[\s\-•*]*([A-Z]+-\d+[\s,;]*){1,3}[\s.]*$")
+_CONTENT_DRAFT_CTA = re.compile(
+    r"studiomethod\.ai|substack\.com|follow me|subscribe|link in bio",
+    re.IGNORECASE,
+)
+_HASHTAG_RE = re.compile(r"#\w+")
+
+
+def _is_raw_error(text: str) -> bool:
+    return any(p.search(text) for p in _RAW_ERROR_PATTERNS)
+
+
+def _has_bare_ticket_id(text: str) -> bool:
+    return bool(_BARE_TICKET_RE.match(text.strip()))
+
+
+def _is_content_draft(text: str) -> bool:
+    if not text or len(text) < 200:
+        return False
+    if text.count("\n") < 4:
+        return False
+    has_cta = bool(_CONTENT_DRAFT_CTA.search(text))
+    has_hashtags = len(_HASHTAG_RE.findall(text)) >= 2
+    return has_cta and has_hashtags
+
+
+def simple_hash(text: str) -> str:
+    """DJB2-style 32-bit hash. Matches the kaleidoscope-policy plugin's
+    simpleHash so dedup state is comparable across the JS/Python boundary
+    while both implementations run in parallel."""
+    h = 0
+    for c in text[:200]:
+        h = ((h << 5) - h + ord(c)) & 0xFFFFFFFF
+        if h & 0x80000000:
+            h -= 0x100000000
+    return str(h)
+
+
+def r29_raw_error(topic: dict, ctx: dict) -> tuple[str, str] | None:
+    """R29: outbound message contains a raw error / stack trace → suppress.
+
+    Migrated from kaleidoscope-policy step 1 (block_raw_errors_to_slack).
+    """
+    text = ctx.get("message_text") or ""
+    if text and _is_raw_error(text):
+        return DECISION_SUPPRESS, "Raw error / stack trace in outbound message"
+    return None
+
+
+def r30_bare_ticket_id(topic: dict, ctx: dict) -> tuple[str, str] | None:
+    """R30: message body is only a bare ticket ID with no context → suppress.
+
+    Migrated from kaleidoscope-policy step 2 (block_bare_ticket_ids).
+    """
+    text = ctx.get("message_text") or ""
+    if text and _has_bare_ticket_id(text):
+        return DECISION_SUPPRESS, "Bare ticket ID without context"
+    return None
+
+
+def r31_content_draft(topic: dict, ctx: dict) -> tuple[str, str] | None:
+    """R31: long-form content draft (newsletter / LinkedIn) routed to chat → suppress.
+
+    Migrated from kaleidoscope-policy step 3 (block_content_drafts_to_chat).
+    Conservative heuristic — must have CTA marker AND >=2 hashtags AND
+    >=200 chars AND >=4 newlines.
+    """
+    text = ctx.get("message_text") or ""
+    if text and _is_content_draft(text):
+        return DECISION_SUPPRESS, "Content draft suppressed — route through Content Studio"
+    return None
+
+
+def r32_recent_duplicate(topic: dict, ctx: dict) -> tuple[str, str] | None:
+    """R32: message text seen within the recent-dupe window → suppress.
+
+    Migrated from kaleidoscope-policy step 4 (duplicate_message_window_ms).
+    The dedup store is loaded into `ctx['recent_messages']` by broker.check
+    (a flat dict of `{hash: iso_timestamp}`); this rule reads only.
+
+    Window defaults to 300_000ms (5 minutes) and can be overridden per-call
+    via `ctx['dupe_window_ms']`.
+    """
+    text = ctx.get("message_text") or ""
+    if not text:
+        return None
+    window_ms = int(ctx.get("dupe_window_ms") or 300_000)
+    h = simple_hash(text)
+    last_seen_iso = (ctx.get("recent_messages") or {}).get(h)
+    if not last_seen_iso:
+        return None
+    last_dt = _parse_iso(last_seen_iso)
+    if last_dt is None:
+        return None
+    age_ms = (datetime.now(timezone.utc) - last_dt).total_seconds() * 1000
+    if age_ms < window_ms:
+        return DECISION_SUPPRESS, f"Duplicate message within {window_ms // 1000}s window ({age_ms / 1000:.0f}s ago)"
+    return None
+
+
 # Default fallthrough: surface
 def _default_surface(topic: dict, ctx: dict) -> tuple[str, str]:
     return DECISION_SURFACE, "No suppression rule matched"
@@ -198,6 +319,12 @@ def _default_surface(topic: dict, ctx: dict) -> tuple[str, str]:
 
 # Rule registry: ordered list of (rule_id, callable)
 DEFAULT_RULES: list[tuple[str, Callable[[dict, dict], tuple[str, str] | None]]] = [
+    # Content gates — run first; cheap heuristics with no topic-state dependency
+    ("R29", r29_raw_error),
+    ("R30", r30_bare_ticket_id),
+    ("R31", r31_content_draft),
+    ("R32", r32_recent_duplicate),
+    # Topic-state rules
     ("R18", r18_all_clear_messages),
     ("R20", r20_producer_already_acted),
     ("R23", r23_juno_already_acted),
