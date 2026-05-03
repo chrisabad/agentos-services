@@ -42,3 +42,58 @@ class BrokerCheckResponse(BaseModel):
     @property
     def should_batch(self) -> bool:
         return self.decision == "batch"
+
+
+class TopicLookupRequest(BaseModel):
+    service: str = Field(min_length=1)
+    problem_type: str = Field(min_length=1)
+    resource: str = Field(min_length=1)
+
+
+class RecordActionRequest(BaseModel):
+    service: str = Field(min_length=1)
+    problem_type: str = Field(min_length=1)
+    resource: str = Field(min_length=1)
+    action: str = Field(min_length=1, description="Action taken (comment_posted, issue_closed, messaged_chris, ...)")
+    evidence_ref: str = Field(default="", description="Optional evidence pointer (issue id, comment id, slack ts)")
+
+
+class DispositionRequest(BaseModel):
+    service: str = Field(min_length=1)
+    problem_type: str = Field(min_length=1)
+    resource: str = Field(min_length=1)
+    disposition: Literal["acknowledged", "resolved", "muted"]
+    source: str = Field(default="explicit", description="Where the disposition signal came from")
+    evidence: str = Field(default="")
+    muted_until: str | None = Field(default=None, description="ISO8601 expiry for mutes (optional)")
+
+
+class SimpleAck(BaseModel):
+    ok: bool
+    fingerprint: str
+    detail: str = ""
+
+
+class TopicSummary(BaseModel):
+    fingerprint: str
+    canonical_name: str
+    state: str
+    surface_tier: str
+    surface_count: int
+    last_surfaced: str | None = None
+    disposition: str | None = None
+    related_issue_ids: list[str] = Field(default_factory=list)
+    producer_actions: list[dict] = Field(default_factory=list)
+    resolved_channel: str | None = None
+
+
+class StandingDecisionsResponse(BaseModel):
+    rules: list[dict]
+
+
+class StatsResponse(BaseModel):
+    total_topics: int
+    by_state: dict
+    by_tier: dict
+    total_surfaces: int
+    version: int
