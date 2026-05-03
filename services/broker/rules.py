@@ -326,6 +326,47 @@ def r33_chris_24h_dedup(topic: dict, ctx: dict) -> tuple[str, str] | None:
     return None
 
 
+# Account IDs that are treated as the Weekend workspace for outbound channel filtering.
+# Mirrors `confidentiality.json` `weekend_account_ids`. Hard-coded here because the
+# identity is stable; the per-deployment policy (which channel is permitted) comes from
+# the request context.
+WEEKEND_ACCOUNT_IDS = frozenset(["weekend"])
+
+
+def r35_weekend_outbound_filter(topic: dict, ctx: dict) -> tuple[str, str] | None:
+    """R35: Weekend workspace outbound channel filter (AGE-2488).
+
+    Migrated from kaleidoscope-policy step 8. When the destination account is the
+    Weekend workspace, only one specific channel is allowed; all other targets are
+    blocked.
+
+    Required ctx keys for this rule to fire:
+      - account_id: destination account identifier
+      - channel_target: destination channel ID
+      - weekend_outbound_filter.permitted_target: the only channel allowed when
+        account_id is in WEEKEND_ACCOUNT_IDS
+
+    If the policy isn't configured (no `weekend_outbound_filter` in ctx), the rule
+    passes — matching current production behavior where the policy is unset.
+    """
+    account_id = ctx.get("account_id") or ""
+    if account_id not in WEEKEND_ACCOUNT_IDS:
+        return None
+    filter_cfg = ctx.get("weekend_outbound_filter") or {}
+    permitted = filter_cfg.get("permitted_target")
+    if not permitted:
+        return None
+    channel = ctx.get("channel_target") or topic.get("resolved_channel") or ""
+    if not channel:
+        return None
+    if channel == permitted:
+        return None
+    return (
+        DECISION_SUPPRESS,
+        f"Weekend workspace channel blocked — target={channel} not permitted; only {permitted} allowed (AGE-2488)",
+    )
+
+
 def r32_recent_duplicate(topic: dict, ctx: dict) -> tuple[str, str] | None:
     """R32: message text seen within the recent-dupe window → suppress.
 
@@ -366,6 +407,7 @@ DEFAULT_RULES: list[tuple[str, Callable[[dict, dict], tuple[str, str] | None]]] 
     ("R31", r31_content_draft),
     ("R32", r32_recent_duplicate),
     ("R33", r33_chris_24h_dedup),
+    ("R35", r35_weekend_outbound_filter),
     # Topic-state rules
     ("R18", r18_all_clear_messages),
     ("R20", r20_producer_already_acted),
