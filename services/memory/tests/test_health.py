@@ -33,9 +33,10 @@ def test_unknown_path_requires_auth(client):
 
 
 def test_bearer_with_correct_token_passes_middleware(client):
-    # Endpoint not implemented yet → expect 404 (not 401), proving auth gate let it through
+    # /memory/search lands on the endpoint and returns 422 because q/agent params are missing
+    # — proving the auth gate let the request through (a 401 here would be a regression).
     res = client.get("/memory/search", headers={"authorization": "Bearer test-token"})
-    assert res.status_code == 404
+    assert res.status_code == 422
 
 
 def test_bearer_with_wrong_token_returns_401(client):
