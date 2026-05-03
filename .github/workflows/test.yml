@@ -1,0 +1,25 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: [self-hosted, agentos-mac]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up venv
+        run: |
+          python3 -m venv .venv
+          ./.venv/bin/pip install --upgrade pip
+          ./.venv/bin/pip install -e ".[dev]"
+
+      - name: Lint
+        run: ./.venv/bin/ruff check .
+
+      - name: Test
+        run: ./.venv/bin/pytest -q
