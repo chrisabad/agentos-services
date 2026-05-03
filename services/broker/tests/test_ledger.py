@@ -44,7 +44,12 @@ def _new_topic(fp: str = "fp1", **overrides) -> dict:
 
 def test_load_missing_returns_empty(fake_ledger_path):
     led = ledger.load_ledger()
-    assert led == {"version": 1, "topics": {}, "recent_messages": {}}
+    # Top-level keys: version + topics + recent_messages + chris_dedup (with today's date)
+    assert led["version"] == 1
+    assert led["topics"] == {}
+    assert led["recent_messages"] == {}
+    assert led["chris_dedup"]["entries"] == {}
+    assert led["chris_dedup"]["date"]  # populated with today's UTC date
 
 
 def test_save_and_reload_roundtrip(fake_ledger_path):

@@ -27,10 +27,11 @@ from services.broker.fingerprint import compute_fingerprint, name_similarity
 from services.broker.ledger import (
     load_ledger, save_ledger, upsert_topic, transition_topic,
     record_surface, add_producer_action, get_topic, prune_resolved,
-    record_recent_message,
+    record_recent_message, record_chris_dedup,
 )
 from services.broker.rules import (
     RuleEngine, resolve_channel, decay_tier, simple_hash,
+    CHRIS_CHANNELS, normalize_for_dedup,
     DECISION_SUPPRESS, DECISION_SURFACE, DECISION_BATCH, DECISION_DECAY,
 )
 
@@ -259,6 +260,8 @@ class AttentionBroker:
             "consumer": consumer,
             # R32 (recent-duplicate) reads this; pass the dedup store from the ledger
             "recent_messages": ledger.get("recent_messages") or {},
+            # R33 (Chris 24h dedup) reads this; load_ledger rotates entries daily
+            "chris_dedup_today": (ledger.get("chris_dedup") or {}).get("entries") or {},
         }
         # Mark already_surfaced_in_any_channel if surface_count > 0 and last_surfaced today
         if topic.get("surface_count", 0) > 0 and topic.get("last_surfaced"):
@@ -305,6 +308,9 @@ class AttentionBroker:
                     if text:
                         window_ms = int(ctx.get("dupe_window_ms") or 300_000)
                         ledger = record_recent_message(ledger, simple_hash(text), window_ms=window_ms)
+                        # R33 dedup: stamp normalized hash if delivering to a Chris channel
+                        if resolved_channel in CHRIS_CHANNELS:
+                            ledger = record_chris_dedup(ledger, simple_hash(normalize_for_dedup(text)))
                 self._save(ledger)
             except (ValueError, RuntimeError) as e:
                 # Non-fatal — log but don't block delivery
