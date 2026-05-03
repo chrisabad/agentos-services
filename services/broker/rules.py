@@ -285,6 +285,47 @@ def r31_content_draft(topic: dict, ctx: dict) -> tuple[str, str] | None:
     return None
 
 
+# Slack channels that get the 24h dedup treatment (Chris's high-priority targets)
+CHRIS_CHANNELS = frozenset(["C0AKKLWGNG4", "D0AFURXGVTM"])
+
+
+def normalize_for_dedup(text: str) -> str:
+    """Strip ISO timestamps + collapse whitespace + lowercase + truncate to 200 chars.
+
+    Mirrors the kaleidoscope-policy `normalizeForDedup` so the same message
+    posted at 09:00 and 14:00 is recognized as a duplicate (timestamp drift
+    is the only thing that changed).
+    """
+    text = re.sub(r"\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?Z?\]?", "", text)
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text[:200]
+
+
+def r33_chris_24h_dedup(topic: dict, ctx: dict) -> tuple[str, str] | None:
+    """R33: 24h dedup for Chris's high-priority channels.
+
+    Migrated from kaleidoscope-policy step 4.5 (AGE-239). Suppresses repeated
+    notifications to #agent-ops or DM:chris that have already been delivered
+    within the same UTC day. Uses normalized + hashed text so timestamp drift
+    doesn't defeat the dedup.
+
+    The dedup store is loaded into `ctx['chris_dedup_today']` by broker.check
+    (a flat dict of `{hash: count}`). The store rotates daily on read.
+    """
+    channel = topic.get("resolved_channel") or ctx.get("resolved_channel") or ""
+    if channel not in CHRIS_CHANNELS:
+        return None
+    text = ctx.get("message_text") or ""
+    if not text:
+        return None
+    h = simple_hash(normalize_for_dedup(text))
+    chris_store = ctx.get("chris_dedup_today") or {}
+    count = chris_store.get(h)
+    if count:
+        return DECISION_SUPPRESS, f"Chris-channel 24h dedup (seen {count}x today)"
+    return None
+
+
 def r32_recent_duplicate(topic: dict, ctx: dict) -> tuple[str, str] | None:
     """R32: message text seen within the recent-dupe window → suppress.
 
@@ -324,6 +365,7 @@ DEFAULT_RULES: list[tuple[str, Callable[[dict, dict], tuple[str, str] | None]]] 
     ("R30", r30_bare_ticket_id),
     ("R31", r31_content_draft),
     ("R32", r32_recent_duplicate),
+    ("R33", r33_chris_24h_dedup),
     # Topic-state rules
     ("R18", r18_all_clear_messages),
     ("R20", r20_producer_already_acted),

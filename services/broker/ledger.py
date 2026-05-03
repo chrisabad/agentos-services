@@ -62,7 +62,16 @@ def ledger_path() -> Path:
 
 
 def _empty_ledger() -> dict[str, Any]:
-    return {"version": LEDGER_VERSION, "topics": {}, "recent_messages": {}}
+    return {
+        "version": LEDGER_VERSION,
+        "topics": {},
+        "recent_messages": {},
+        "chris_dedup": {"date": _today_iso_date(), "entries": {}},
+    }
+
+
+def _today_iso_date() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def load_ledger() -> dict[str, Any]:
@@ -82,6 +91,10 @@ def load_ledger() -> dict[str, Any]:
     data.setdefault("version", LEDGER_VERSION)
     data.setdefault("topics", {})
     data.setdefault("recent_messages", {})
+    chris = data.setdefault("chris_dedup", {"date": _today_iso_date(), "entries": {}})
+    # Daily rotation — clear yesterday's entries
+    if chris.get("date") != _today_iso_date():
+        data["chris_dedup"] = {"date": _today_iso_date(), "entries": {}}
     return data
 
 
@@ -213,6 +226,23 @@ def prune_resolved(ledger: dict[str, Any], max_age_hours: int = 168) -> dict[str
         if ts_dt is None or ts_dt > cutoff:
             surviving[fp] = topic
     ledger["topics"] = surviving
+    return ledger
+
+
+def record_chris_dedup(ledger: dict[str, Any], message_hash: str) -> dict[str, Any]:
+    """Increment the count for `message_hash` in today's Chris-channel dedup store.
+
+    Used by R33 (24h dedup for Chris's high-priority channels). The store
+    rotates daily — reads via `load_ledger()` reset the entries when the date
+    rolls over.
+    """
+    today = _today_iso_date()
+    bucket = ledger.setdefault("chris_dedup", {"date": today, "entries": {}})
+    if bucket.get("date") != today:
+        bucket["date"] = today
+        bucket["entries"] = {}
+    bucket["entries"][message_hash] = int(bucket["entries"].get(message_hash, 0)) + 1
+    ledger["chris_dedup"] = bucket
     return ledger
 
 
