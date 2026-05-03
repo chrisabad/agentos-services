@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -15,7 +15,7 @@ class SearchResult(BaseModel):
     kind: Literal["memory_md", "graphiti", "session"] = Field(
         description="Where this result came from"
     )
-    ts: datetime | None = Field(default=None, description="Original write time, if known")
+    ts: Optional[datetime] = Field(default=None, description="Original write time, if known")
 
 
 class SearchResponse(BaseModel):
@@ -28,7 +28,7 @@ class AppendRequest(BaseModel):
     agent: str = Field(description="Agent name (matches the directory under workspace/agents/)")
     text: str = Field(min_length=1, description="Memory text to record")
     kind: str = Field(default="manual", description="Origin tag (manual, dreaming, etc.)")
-    source: str | None = Field(
+    source: Optional[str] = Field(
         default=None, description="Optional provenance path or comment URL"
     )
 
