@@ -62,7 +62,7 @@ def ledger_path() -> Path:
 
 
 def _empty_ledger() -> dict[str, Any]:
-    return {"version": LEDGER_VERSION, "topics": {}}
+    return {"version": LEDGER_VERSION, "topics": {}, "recent_messages": {}}
 
 
 def load_ledger() -> dict[str, Any]:
@@ -81,6 +81,7 @@ def load_ledger() -> dict[str, Any]:
         return _empty_ledger()
     data.setdefault("version", LEDGER_VERSION)
     data.setdefault("topics", {})
+    data.setdefault("recent_messages", {})
     return data
 
 
@@ -212,6 +213,34 @@ def prune_resolved(ledger: dict[str, Any], max_age_hours: int = 168) -> dict[str
         if ts_dt is None or ts_dt > cutoff:
             surviving[fp] = topic
     ledger["topics"] = surviving
+    return ledger
+
+
+def record_recent_message(
+    ledger: dict[str, Any],
+    message_hash: str,
+    *,
+    window_ms: int = 300_000,
+) -> dict[str, Any]:
+    """Stamp `message_hash` with `now`, then prune entries older than `window_ms`.
+
+    Used by R32 (recent-duplicate suppression). Pruning is lazy — every write
+    sweeps the store so it stays bounded even under sustained load.
+    """
+    bucket = ledger.setdefault("recent_messages", {})
+    now = datetime.now(timezone.utc)
+    bucket[message_hash] = now.isoformat()
+    cutoff = now - timedelta(milliseconds=window_ms)
+    surviving: dict[str, str] = {}
+    for h, iso in bucket.items():
+        try:
+            ts_str = iso[:-1] + "+00:00" if isinstance(iso, str) and iso.endswith("Z") else iso
+            ts_dt = datetime.fromisoformat(ts_str) if isinstance(ts_str, str) else None
+        except ValueError:
+            ts_dt = None
+        if ts_dt is None or ts_dt > cutoff:
+            surviving[h] = iso
+    ledger["recent_messages"] = surviving
     return ledger
 
 

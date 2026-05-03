@@ -8,7 +8,7 @@ on:
 
 jobs:
   pytest:
-    runs-on: [self-hosted, agentos-mac]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
