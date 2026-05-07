@@ -14,8 +14,10 @@ help:
 dev:
 	uvicorn services.memory.app:app --host 127.0.0.1 --port $(PORT) --reload
 
+VENV_PATH := ./.venv
+
 test:
-	pytest -q
+	$(VENV_PATH)/bin/pytest -q
 
 fmt:
 	ruff format .

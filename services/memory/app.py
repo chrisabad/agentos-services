@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 
 from services.memory.auth import BearerAuthMiddleware
+from services.memory.cache import init_cache
 from services.memory.config import get_settings, get_version
 from services.memory.embedding import EmbeddingClient
 from services.memory.graphiti import GraphitiClient
@@ -67,8 +68,15 @@ def create_app() -> FastAPI:
     prewarm_agents_env = os.environ.get("AGENTOS_MEMORY_PREWARM_AGENTS", "")
     prewarm_agents = [a.strip() for a in prewarm_agents_env.split(",") if a.strip()]
 
+    # Cache settings for rerank result caching
+    rerank_cache_ttl_s = float(os.environ.get("AGENTOS_MEMORY_RERANK_CACHE_TTL_S", "300"))
+    rerank_cache_maxsize = int(os.environ.get("AGENTOS_MEMORY_RERANK_CACHE_MAXSIZE", "10000"))
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        # Initialize rerank cache
+        init_cache(maxsize=rerank_cache_maxsize, ttl_s=rerank_cache_ttl_s)
+
         if embedding_client and prewarm_agents:
             await _prewarm_doc_cache(embedding_client, prewarm_agents)
         try:
