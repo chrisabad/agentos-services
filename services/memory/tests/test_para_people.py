@@ -188,7 +188,6 @@ async def test_search_returns_para_person_by_fact(workspace_with_corpus_and_peop
 async def test_search_para_person_and_memory_md_mixed(workspace_with_corpus_and_people):
     """Both memory_md and para_person results should appear for relevant queries."""
     results = await search_memory(agent="axel", query="Weekend Slack Docker")
-    kinds = {r.kind for r in results}
     # Depending on scores, may have both or just one kind
     assert len(results) > 0, "expected results for 'Weekend Slack Docker'"
 
