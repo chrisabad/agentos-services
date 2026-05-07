@@ -21,6 +21,10 @@ def client(monkeypatch, tmp_path):
     fake_root = tmp_path / "workspace" / "agents"
     fake_root.mkdir(parents=True)
     monkeypatch.setattr(store, "WORKSPACE_AGENT_PATHS", [fake_root])
+    # Isolate from real PARA people data on disk
+    empty_people = tmp_path / "empty_people"
+    empty_people.mkdir()
+    monkeypatch.setattr(store, "PARA_PEOPLE_PATH", empty_people)
     config.get_settings.cache_clear()
     from services.memory.app import create_app
 
