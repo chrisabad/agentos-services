@@ -16,7 +16,7 @@ from services.memory.search import search_memory
 def workspace_with_corpus(monkeypatch, tmp_path):
     fake_root = tmp_path / "workspace" / "agents"
     fake_root.mkdir(parents=True)
-    monkeypatch.setattr(store, "WORKSPACE_AGENTS", fake_root)
+    monkeypatch.setattr(store, "WORKSPACE_AGENT_PATHS", [fake_root])
     md = fake_root / "axel" / "MEMORY.md"
     md.parent.mkdir(parents=True)
     md.write_text(
