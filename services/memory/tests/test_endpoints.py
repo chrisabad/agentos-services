@@ -20,7 +20,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENTOS_MEMORY_GRAPHITI_ENABLED", "0")
     fake_root = tmp_path / "workspace" / "agents"
     fake_root.mkdir(parents=True)
-    monkeypatch.setattr(store, "WORKSPACE_AGENTS", fake_root)
+    monkeypatch.setattr(store, "WORKSPACE_AGENT_PATHS", [fake_root])
     config.get_settings.cache_clear()
     from services.memory.app import create_app
 

@@ -12,7 +12,7 @@ from services.memory import store
 def tmp_workspace(monkeypatch, tmp_path):
     fake_root = tmp_path / "workspace" / "agents"
     fake_root.mkdir(parents=True)
-    monkeypatch.setattr(store, "WORKSPACE_AGENTS", fake_root)
+    monkeypatch.setattr(store, "WORKSPACE_AGENT_PATHS", [fake_root])
     return fake_root
 
 

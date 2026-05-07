@@ -12,7 +12,7 @@ class SearchResult(BaseModel):
     source: str = Field(description="Origin path or graph node identifier")
     score: float = Field(description="Aggregate retrieval score (0..1, higher is better)")
     excerpt: str = Field(description="Matching text or summary")
-    kind: Literal["memory_md", "graphiti", "session"] = Field(
+    kind: Literal["memory_md", "graphiti", "session", "para_person"] = Field(
         description="Where this result came from"
     )
     ts: Optional[datetime] = Field(default=None, description="Original write time, if known")

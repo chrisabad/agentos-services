@@ -12,7 +12,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-WORKSPACE_AGENTS = Path.home() / ".openclaw" / "workspace" / "agents"
+
+HERMES_AGENTS = Path.home() / ".hermes" / "profiles"
+OPENCLAW_AGENTS = Path.home() / ".openclaw" / "workspace" / "agents"
+WORKSPACE_AGENT_PATHS = [HERMES_AGENTS, OPENCLAW_AGENTS]
+# Backward-compatible alias — existing tests monkeypatch WORKSPACE_AGENTS.
+WORKSPACE_AGENTS = OPENCLAW_AGENTS
+
+PARA_PEOPLE_PATH = Path.home() / ".openclaw" / "workspace" / "agents" / "shared" / "life" / "areas" / "people"
+
 
 DATE_HEADING = re.compile(r"^##\s+Promoted From Short-Term Memory\s+\(([0-9]{4}-[0-9]{2}-[0-9]{2})\)\s*$")
 PROVENANCE_COMMENT = re.compile(r"^<!--\s*openclaw-memory-promotion:(.+?)\s*-->\s*$")
@@ -31,8 +39,36 @@ class MemoryEntry:
         return f"{self.agent}:{self.line_no}"
 
 
+@dataclass
+class ParaPersonEntry:
+    """A single searchable item from a PARA people entity folder.
+
+    Each slug folder under ``PARA_PEOPLE_PATH`` contains ``summary.md`` and
+    ``items.yaml``. The summary is exposed as one entry; every top-level item
+    in ``items.yaml`` is exposed as its own entry so keyword and embedding
+    search can match on individual facts.
+    """
+
+    slug: str
+    text: str
+    source_file: str  # "summary" or "items"
+    item_key: str | None  # None for summary entries; YAML key for item entries
+
+    def memory_id(self) -> str:
+        if self.item_key:
+            return f"para_person:{self.slug}:{self.source_file}:{self.item_key}"
+        return f"para_person:{self.slug}:{self.source_file}"
+
+
 def agent_dir(agent: str) -> Path:
-    return WORKSPACE_AGENTS / agent
+    for base_path in WORKSPACE_AGENT_PATHS:
+        full_path = base_path / agent
+        if full_path.exists():
+            return full_path
+    # If no existing directory is found, create it in the first path
+    first_path = WORKSPACE_AGENT_PATHS[0] / agent
+    first_path.mkdir(parents=True, exist_ok=True)
+    return first_path
 
 
 def memory_md_path(agent: str) -> Path:
@@ -130,3 +166,72 @@ def append_entry(
         fh.write(appended)
 
     return memory_id, path
+
+
+def read_para_people_entries(people_path: Path | None = None) -> list[ParaPersonEntry]:
+    """Parse all PARA people entity folders and return searchable entries.
+
+    Each entity folder is ``<slug>/summary.md`` + ``<slug>/items.yaml``.
+    The summary produces one entry; every top-level key-value pair in
+    ``items.yaml`` produces its own entry with ``item_key`` set to the YAML
+    key and ``text`` set to ``"<key>: <value>"``.
+    """
+    import yaml
+
+    root = people_path or PARA_PEOPLE_PATH
+    if not root.exists():
+        return []
+
+    entries: list[ParaPersonEntry] = []
+
+    for slug_dir in sorted(root.iterdir()):
+        if not slug_dir.is_dir():
+            continue
+        slug = slug_dir.name
+
+        # summary.md — one entry with the full text
+        summary_path = slug_dir / "summary.md"
+        if summary_path.exists():
+            summary_text = summary_path.read_text(encoding="utf-8", errors="replace").strip()
+            if summary_text:
+                entries.append(
+                    ParaPersonEntry(
+                        slug=slug,
+                        text=summary_text,
+                        source_file="summary",
+                        item_key=None,
+                    )
+                )
+
+        # items.yaml — one entry per top-level key-value pair
+        items_path = slug_dir / "items.yaml"
+        if items_path.exists():
+            try:
+                data = yaml.safe_load(items_path.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    text = f"{key}: {value}" if value is not None else str(key)
+                    entries.append(
+                        ParaPersonEntry(
+                            slug=slug,
+                            text=text,
+                            source_file="items",
+                            item_key=str(key),
+                        )
+                    )
+            elif isinstance(data, list):
+                for i, item in enumerate(data):
+                    text = str(item) if item is not None else ""
+                    if text:
+                        entries.append(
+                            ParaPersonEntry(
+                                slug=slug,
+                                text=text,
+                                source_file="items",
+                                item_key=str(i),
+                            )
+                        )
+
+    return entries
