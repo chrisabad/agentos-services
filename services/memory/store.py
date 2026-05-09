@@ -53,6 +53,9 @@ class ParaPersonEntry:
     text: str
     source_file: str  # "summary" or "items"
     item_key: str | None  # None for summary entries; YAML key for item entries
+    display_name: str | None = None  # from YAML frontmatter
+    emails: list[str] | None = None  # from YAML frontmatter
+    aliases: list[str] | None = None  # from YAML frontmatter
 
     def memory_id(self) -> str:
         if self.item_key:
@@ -189,10 +192,29 @@ def read_para_people_entries(people_path: Path | None = None) -> list[ParaPerson
             continue
         slug = slug_dir.name
 
-        # summary.md — one entry with the full text
+        # Extract metadata from summary.md frontmatter
+        display_name: str | None = None
+        emails: list[str] | None = None
+        aliases: list[str] | None = None
+
         summary_path = slug_dir / "summary.md"
         if summary_path.exists():
-            summary_text = summary_path.read_text(encoding="utf-8", errors="replace").strip()
+            summary_text = summary_path.read_text(encoding="utf-8", errors="replace")
+
+            # Parse YAML frontmatter
+            if summary_text.startswith("---"):
+                parts = summary_text.split("---", 2)
+                if len(parts) >= 3:
+                    try:
+                        frontmatter = yaml.safe_load(parts[1])
+                        if isinstance(frontmatter, dict):
+                            display_name = frontmatter.get("display_name")
+                            emails = frontmatter.get("emails")
+                            aliases = frontmatter.get("aliases")
+                    except Exception:
+                        pass
+                    summary_text = parts[2].strip()
+
             if summary_text:
                 entries.append(
                     ParaPersonEntry(
@@ -200,6 +222,9 @@ def read_para_people_entries(people_path: Path | None = None) -> list[ParaPerson
                         text=summary_text,
                         source_file="summary",
                         item_key=None,
+                        display_name=display_name,
+                        emails=emails if emails else None,
+                        aliases=aliases if aliases else None,
                     )
                 )
 
@@ -210,18 +235,57 @@ def read_para_people_entries(people_path: Path | None = None) -> list[ParaPerson
                 data = yaml.safe_load(items_path.read_text(encoding="utf-8", errors="replace"))
             except Exception:
                 data = None
+
             if isinstance(data, dict):
-                for key, value in data.items():
-                    text = f"{key}: {value}" if value is not None else str(key)
-                    entries.append(
-                        ParaPersonEntry(
-                            slug=slug,
-                            text=text,
-                            source_file="items",
-                            item_key=str(key),
+                # Check for new hierarchical format with "person" metadata
+                if "person" in data:
+                    person_meta = data.get("person", {})
+                    if isinstance(person_meta, dict):
+                        # Extract metadata from items.yaml if not found in summary
+                        if display_name is None:
+                            display_name = person_meta.get("display_name")
+                        if not emails:
+                            emails = person_meta.get("emails")
+                        if not aliases:
+                            aliases = person_meta.get("aliases")
+
+                    # Parse items list
+                    items_data = data.get("items", [])
+                    if isinstance(items_data, list):
+                        for item in items_data:
+                            if isinstance(item, dict):
+                                fact = item.get("fact", "")
+                                if fact:
+                                    text = fact
+                                    item_id = item.get("id")
+                                    entries.append(
+                                        ParaPersonEntry(
+                                            slug=slug,
+                                            text=text,
+                                            source_file="items",
+                                            item_key=item_id,
+                                            display_name=display_name,
+                                            emails=emails if emails else None,
+                                            aliases=aliases if aliases else None,
+                                        )
+                                    )
+                else:
+                    # Old flat key-value format (backward compatibility)
+                    for key, value in data.items():
+                        text = f"{key}: {value}" if value is not None else str(key)
+                        entries.append(
+                            ParaPersonEntry(
+                                slug=slug,
+                                text=text,
+                                source_file="items",
+                                item_key=str(key),
+                                display_name=display_name,
+                                emails=emails if emails else None,
+                                aliases=aliases if aliases else None,
+                            )
                         )
-                    )
             elif isinstance(data, list):
+                # List format (backward compatibility)
                 for i, item in enumerate(data):
                     text = str(item) if item is not None else ""
                     if text:
@@ -231,6 +295,9 @@ def read_para_people_entries(people_path: Path | None = None) -> list[ParaPerson
                                 text=text,
                                 source_file="items",
                                 item_key=str(i),
+                                display_name=display_name,
+                                emails=emails if emails else None,
+                                aliases=aliases if aliases else None,
                             )
                         )
 

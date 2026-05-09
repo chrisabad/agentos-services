@@ -58,6 +58,49 @@ def _keyword_score(query_tokens: set[str], entry_tokens: set[str]) -> float:
     return len(overlap) / math.sqrt(len(query_tokens) * len(entry_tokens))
 
 
+def _slug_match_boost(
+    query_tokens: set[str],
+    slug: str,
+    display_name: str | None,
+    emails: list[str] | None,
+    aliases: list[str] | None,
+) -> float:
+    """Compute boost multiplier for para_person slug/name/email matches.
+
+    Returns 5-10x multiplier if any query token matches slug, display_name,
+    aliases, or email local-parts (case-insensitive). No boost (return 1.0) if
+    no matches found.
+    """
+    if not query_tokens:
+        return 1.0
+
+    slug_tokens = _tokenize(slug)
+    if query_tokens & slug_tokens:
+        return 7.0  # mid-range boost for slug match
+
+    if display_name:
+        name_tokens = _tokenize(display_name)
+        if query_tokens & name_tokens:
+            return 8.0  # higher boost for display_name match
+
+    if aliases:
+        for alias in aliases:
+            alias_tokens = _tokenize(alias)
+            if query_tokens & alias_tokens:
+                return 7.0
+
+    if emails:
+        for email in emails:
+            # Extract local-part (before @)
+            if "@" in email:
+                local_part = email.split("@")[0].lower()
+                local_tokens = _tokenize(local_part)
+                if query_tokens & local_tokens:
+                    return 6.0  # lower boost for email local-part match
+
+    return 1.0  # no match, no boost
+
+
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
@@ -167,11 +210,20 @@ async def search_memory(
         ks = _keyword_score(query_tokens, _tokenize(entry.text))
         scored.append((entry.text, ks, ks, entry))
 
-    # Step 1b: keyword scoring for PARA people entries
+    # Step 1b: keyword scoring for PARA people entries with slug-match boost
     para_entries = read_para_people_entries()
     for pentry in para_entries:
         ks = _keyword_score(query_tokens, _tokenize(pentry.text))
-        scored.append((pentry.text, ks, ks, pentry))
+        # Apply slug/name/email boost for para_person entries
+        boost = _slug_match_boost(
+            query_tokens,
+            pentry.slug,
+            pentry.display_name,
+            pentry.emails,
+            pentry.aliases,
+        )
+        boosted_ks = ks * boost
+        scored.append((pentry.text, ks, boosted_ks, pentry))
 
     # Step 2.5: check rerank cache for (agent, query) hit
     # If valid cache entry exists, use cached embeddings (no sync call, no latency penalty).
@@ -216,10 +268,16 @@ async def search_memory(
 
     # Convert scored entries to SearchResult, dispatching on entry type.
     md_results: list[SearchResult] = []
+    seen_para_slugs: set[str] = set()  # For deduplication
     for text, ks, blended, entry in scored:
         if blended <= 0:
             continue
+
         if isinstance(entry, ParaPersonEntry):
+            # Deduplicate: keep only highest-scoring variant per slug
+            if entry.slug in seen_para_slugs:
+                continue
+            seen_para_slugs.add(entry.slug)
             md_results.append(_to_para_result(entry, blended))
         else:
             md_results.append(_to_result(entry, blended))
