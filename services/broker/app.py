@@ -84,6 +84,7 @@ def create_app() -> FastAPI:
                 related_issue_ids=req.related_issue_ids,
                 context=req.context,
                 surface_tier=req.surface_tier,
+                agent_id=req.agent_id,
                 dry_run=req.dry_run,
             )
         except Exception as e:

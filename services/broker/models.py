@@ -19,6 +19,7 @@ class BrokerCheckRequest(BaseModel):
     related_issue_ids: list[str] = Field(default_factory=list)
     context: dict = Field(default_factory=dict)
     surface_tier: Literal["immediate", "daily_brief", "weekly_brief", "muted"] = "immediate"
+    agent_id: str | None = Field(default=None, description="Agent ID for topic-level cooldown tracking (optional)")
     dry_run: bool = False
 
 

@@ -28,6 +28,7 @@ from services.broker.ledger import (
     load_ledger, save_ledger, upsert_topic, transition_topic,
     record_surface, add_producer_action, get_topic, prune_resolved,
     record_recent_message, record_chris_dedup,
+    check_topic_cooldown, record_topic_cooldown,
 )
 from services.broker.rules import (
     RuleEngine, resolve_channel, decay_tier, simple_hash,
@@ -101,6 +102,21 @@ class AttentionBroker:
         self._engine = RuleEngine()
 
     def _load(self) -> dict:
+        if self._ledger_path:
+            # Override for testing: load from the test ledger path
+            import json
+            if self._ledger_path.exists():
+                with open(self._ledger_path, "r") as f:
+                    return json.load(f)
+            else:
+                # Return empty ledger if file doesn't exist yet
+                return {
+                    "version": 1,
+                    "topics": {},
+                    "recent_messages": {},
+                    "chris_dedup": {"date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "entries": {}},
+                    "topic_cooldowns": {},
+                }
         return load_ledger()
 
     def _save(self, ledger: dict) -> None:
@@ -126,6 +142,7 @@ class AttentionBroker:
         context: Optional[dict] = None,
         surface_tier: str = "immediate",
         dry_run: bool = False,
+        agent_id: Optional[str] = None,
     ) -> BrokerResult:
         """Run the 7-step broker decision flow.
 
@@ -149,6 +166,33 @@ class AttentionBroker:
         ctx = context or {}
         related = related_issue_ids or []
         biz = business or service
+        effective_canonical = canonical_name or f"{service}/{problem_type}/{resource}"
+
+        # ── TOPIC-LEVEL COOLDOWN CHECK ───────────────────────────────
+        # If topic-level cooldown is enabled and agent_id is provided, check for suppression.
+        # This is independent of fingerprint and fires before rule evaluation.
+        if agent_id and effective_canonical:
+            # Determine cooldown duration based on surface tier
+            cooldown_durations = {
+                "immediate": 14400000,     # 4h
+                "daily_brief": 86400000,   # 24h
+                "weekly_brief": 259200000, # 72h
+                "muted": 604800000,        # 7 days
+            }
+            cooldown_ms = cooldown_durations.get(surface_tier, 14400000)
+
+            ledger = self._load()
+            if check_topic_cooldown(ledger, agent_id, effective_canonical, service):
+                # Topic is within cooldown window — suppress unconditionally
+                return BrokerResult(
+                    decision="suppress",
+                    reason=f"Topic '{effective_canonical}' already surfaced within {cooldown_ms}ms window",
+                    rule_id="TOPIC_COOLDOWN",
+                    fingerprint="",
+                    resolved_channel=None,
+                    topic_state="acknowledged",
+                    topic_tier=surface_tier,
+                )
 
         # ── STEP 1: FINGERPRINT ──────────────────────────────────────
         fp = compute_fingerprint(service, problem_type, resource)
@@ -301,6 +345,16 @@ class AttentionBroker:
                     ledger = record_surface(ledger, fp,
                                             channel=resolved_channel,
                                             tier=topic.get("surface_tier", surface_tier))
+                    # Topic-level cooldown: record this topic's surface time
+                    if agent_id and effective_canonical:
+                        cooldown_durations = {
+                            "immediate": 14400000,     # 4h
+                            "daily_brief": 86400000,   # 24h
+                            "weekly_brief": 259200000, # 72h
+                            "muted": 604800000,        # 7 days
+                        }
+                        cooldown_ms = cooldown_durations.get(surface_tier, 14400000)
+                        ledger = record_topic_cooldown(ledger, agent_id, effective_canonical, service, cooldown_ms)
                     # R32 dedup: stamp the message hash so the next identical
                     # message within the window suppresses. Only on actual
                     # surfacing — suppressed messages don't poison the store.

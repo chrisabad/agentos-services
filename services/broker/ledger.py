@@ -67,6 +67,7 @@ def _empty_ledger() -> dict[str, Any]:
         "topics": {},
         "recent_messages": {},
         "chris_dedup": {"date": _today_iso_date(), "entries": {}},
+        "topic_cooldowns": {},
     }
 
 
@@ -91,6 +92,7 @@ def load_ledger() -> dict[str, Any]:
     data.setdefault("version", LEDGER_VERSION)
     data.setdefault("topics", {})
     data.setdefault("recent_messages", {})
+    data.setdefault("topic_cooldowns", {})
     chris = data.setdefault("chris_dedup", {"date": _today_iso_date(), "entries": {}})
     # Daily rotation — clear yesterday's entries
     if chris.get("date") != _today_iso_date():
@@ -271,6 +273,77 @@ def record_recent_message(
         if ts_dt is None or ts_dt > cutoff:
             surviving[h] = iso
     ledger["recent_messages"] = surviving
+    return ledger
+
+
+def check_topic_cooldown(
+    ledger: dict[str, Any],
+    agent_id: str,
+    topic: str,
+    service: str,
+) -> bool:
+    """Check if a topic is within its cooldown window.
+
+    Returns True if the topic has been surfaced recently and should be suppressed.
+    Returns False if the topic is not in cooldown or not in the table.
+
+    Args:
+        ledger: The broker ledger
+        agent_id: Agent ID (usually Juno's ID or similar)
+        topic: Topic identifier (usually canonical_name)
+        service: Service/business context
+
+    Returns:
+        True if topic is in cooldown, False otherwise
+    """
+    key = f"{agent_id}|{topic}|{service}"
+    cooldowns = ledger.get("topic_cooldowns", {})
+    entry = cooldowns.get(key)
+    if not entry:
+        return False
+
+    last_surfaced_str = entry.get("last_surfaced")
+    cooldown_ms = entry.get("cooldown_ms", 14400000)  # default 4h
+    if not last_surfaced_str:
+        return False
+
+    try:
+        ts_str = last_surfaced_str[:-1] + "+00:00" if isinstance(last_surfaced_str, str) and last_surfaced_str.endswith("Z") else last_surfaced_str
+        last_ts = datetime.fromisoformat(ts_str)
+    except (ValueError, TypeError):
+        return False
+
+    now = datetime.now(timezone.utc)
+    elapsed_ms = (now - last_ts).total_seconds() * 1000
+    return elapsed_ms < cooldown_ms
+
+
+def record_topic_cooldown(
+    ledger: dict[str, Any],
+    agent_id: str,
+    topic: str,
+    service: str,
+    cooldown_ms: int = 14400000,  # default 4h
+) -> dict[str, Any]:
+    """Record that a topic was surfaced, starting its cooldown window.
+
+    Args:
+        ledger: The broker ledger
+        agent_id: Agent ID
+        topic: Topic identifier
+        service: Service/business context
+        cooldown_ms: Cooldown duration in milliseconds (default 4h = 14400000ms)
+
+    Returns:
+        The (mutated) ledger
+    """
+    cooldowns = ledger.setdefault("topic_cooldowns", {})
+    key = f"{agent_id}|{topic}|{service}"
+    cooldowns[key] = {
+        "last_surfaced": _now_iso(),
+        "cooldown_ms": cooldown_ms,
+    }
+    ledger["topic_cooldowns"] = cooldowns
     return ledger
 
 

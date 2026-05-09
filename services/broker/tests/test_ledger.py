@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 import pytest
+from datetime import datetime, timezone
 
 from services.broker import ledger
 
@@ -16,6 +17,7 @@ def fake_ledger_path(monkeypatch, tmp_path):
 
 
 def _new_topic(fp: str = "fp1", **overrides) -> dict:
+    now_iso = datetime.now(timezone.utc).isoformat()
     base = {
         "fingerprint": fp,
         "canonical_name": "test/build_failure/openclaw",
@@ -27,7 +29,7 @@ def _new_topic(fp: str = "fp1", **overrides) -> dict:
         "related_issue_ids": [],
         "related_thread_ids": [],
         "state": "triggered",
-        "first_seen": "2026-05-02T20:00:00+00:00",
+        "first_seen": now_iso,
         "last_surfaced": None,
         "surface_count": 0,
         "surface_tier": "immediate",
@@ -36,7 +38,7 @@ def _new_topic(fp: str = "fp1", **overrides) -> dict:
         "disposition_evidence": None,
         "producer_actions": [],
         "muted_until": None,
-        "last_state_change": "2026-05-02T20:00:00+00:00",
+        "last_state_change": now_iso,
     }
     base.update(overrides)
     return base
