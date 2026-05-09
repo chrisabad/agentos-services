@@ -1,5 +1,7 @@
-"""Tests for Phase 0.3 search resilience knobs:
-- per-call embedding timeout falls back to keyword-only
+"""Tests for search resilience:
+- cache miss returns keyword-only immediately (no sync embedding call)
+- cache hit returns blended results (no embedding fetch needed)
+- background cache population works
 - per-call graphiti timeout falls back gracefully
 - LRU cache hits replace embedding fetches
 """
@@ -19,7 +21,11 @@ from services.memory.search import search_memory
 def workspace_with_corpus(monkeypatch, tmp_path):
     fake_root = tmp_path / "workspace" / "agents"
     fake_root.mkdir(parents=True)
-    monkeypatch.setattr(store, "WORKSPACE_AGENTS", fake_root)
+    monkeypatch.setattr(store, "WORKSPACE_AGENT_PATHS", [fake_root])
+    # Isolate from real PARA people data on disk
+    empty_people = tmp_path / "empty_people"
+    empty_people.mkdir()
+    monkeypatch.setattr(store, "PARA_PEOPLE_PATH", empty_people)
     md = fake_root / "axel" / "MEMORY.md"
     md.parent.mkdir(parents=True)
     md.write_text(
@@ -38,6 +44,7 @@ class _SlowEmbeddingClient:
 
     def __init__(self, delay_s: float = 5.0):
         self.delay_s = delay_s
+        self.model = "test-embedding-model"
 
     async def embed(self, inputs):
         await asyncio.sleep(self.delay_s)
