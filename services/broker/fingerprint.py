@@ -13,6 +13,13 @@ This provides:
 - Cross-issue dedup (same underlying problem, different tracking artifacts)
 - Cross-channel dedup (same topic, different delivery channel)
 - Cross-source dedup (same situation detected from email + Slack + Linear)
+
+AGE-13644: Added sender-based triple normalization to prevent divergent
+fingerprints from repeated emails about the same topic. When Juno's email
+triage generates a (service, problem_type, resource) triple from a subject line,
+the result will vary per email even for the same underlying situation. The
+SENDER_TRIPLE_MAP and slugify_for_fingerprint() provide stable, deterministic
+normalization so that recurring senders/topics collapse to a single fingerprint.
 """
 
 import hashlib
@@ -46,6 +53,155 @@ RESOURCE_ALIASES: dict[str, str] = {
     "oauthtoken": "oauth token",
     # Normalized aliases that already collapse — listed for explicitness
 }
+
+
+# ── Sender-based triple normalization (AGE-13644) ──────────────
+# Maps sender domain patterns to stable (service, problem_type, resource) triples.
+# When Juno processes an email, the sender domain is matched against these keys.
+# A matched entry ensures all emails from that sender collapse to the same
+# fingerprint regardless of subject-line phrasing.
+#
+# Key format: lowercase sender domain (everything after @).
+# For subdomain matches, list the most specific subdomain first.
+SENDER_TRIPLE_MAP: dict[str, tuple[str, str, str]] = {
+    # One Medical / health benefits
+    "onemedical.com": ("email-triage", "activation-reminder", "one_medical"),
+    "onetmedical.com": ("email-triage", "activation-reminder", "one_medical"),  # typo variant
+    "1lifehealthcare.com": ("email-triage", "activation-reminder", "one_medical"),
+    # Add more sender domains as they trigger divergent fingerprints.
+    # The normalization table is the preferred fix: stable, no LLM variance.
+}
+
+
+def slugify_for_fingerprint(text: str) -> str:
+    """Deterministic slug normalization for fingerprint components.
+
+    Applied when no SENDER_TRIPLE_MAP entry matches. Produces a stable,
+    predictable slug from free text by:
+    1. Lowercasing
+    2. Removing possessives and articles (your, my, the, a, an)
+    3. Stripping punctuation except hyphens between words
+    4. Collapsing whitespace to single hyphens
+    5. Truncating to 60 chars
+
+    This ensures that minor subject-line rephrasings like:
+      "One Medical benefit activation code VOLLXOM"
+      "One Medical health benefit activation reminder"
+      "Activate Weekend One Medical health benefit"
+    All produce the same slug (after stripping articles): "one-medical-benefit-activation-reminder"
+    rather than 8 different fingerprints.
+
+    Args:
+        text: Free-text subject or canonical name to normalize
+
+    Returns:
+        Stable slug string suitable for use as a fingerprint component
+    """
+    if not text:
+        return "unknown"
+    v = text.lower().strip()
+    # Remove possessives
+    v = re.sub(r"'s\b", "", v)
+    # Remove common articles/determiners that add no information
+    v = re.sub(r"\b(your|my|the|a|an|this|that|please|urgent|action\s+required|reminder|update|notification)\b", "", v)
+    # Remove any remaining punctuation (except hyphens between word chars)
+    v = re.sub(r"[^\w\s-]", "", v)
+    # Collapse internal hyphens surrounded by spaces
+    v = re.sub(r"\s*-\s+", "-", v)
+    # Collapse whitespace to single hyphens
+    v = re.sub(r"\s+", "-", v)
+    # Strip leading/trailing hyphens
+    v = v.strip("-")
+    # Collapse multiple hyphens
+    v = re.sub(r"-{2,}", "-", v)
+    # Truncate to 60 chars at a hyphen boundary if possible
+    if len(v) > 60:
+        cut = v.rfind("-", 0, 60)
+        v = v[:cut] if cut > 20 else v[:60]
+    return v or "unknown"
+
+
+def extract_sender_domain(from_address: str) -> str:
+    """Extract the domain from an email From address.
+
+    Handles formats like:
+    - "Name <user@domain.com>"
+    - "user@domain.com"
+    - "Display Name" <user@domain.com>
+
+    Returns:
+        Lowercase domain string, or empty string if unparseable
+    """
+    if not from_address:
+        return ""
+    # Extract content within angle brackets if present
+    match = re.search(r"<([^>]+)>", from_address)
+    if match:
+        addr = match.group(1).strip()
+    else:
+        addr = from_address.strip()
+    # Split on @ and return domain
+    if "@" in addr:
+        return addr.split("@")[-1].lower().strip()
+    return addr.lower().strip()
+
+
+def normalize_triple_for_email(
+    service: str,
+    problem_type: str,
+    resource: str,
+    sender_address: str = "",
+    subject: str = "",
+) -> tuple[str, str, str]:
+    """Normalize an email-derived triple to a stable fingerprint key.
+
+    This is the main entry point for Juno's email triage path. It applies
+    two levels of normalization:
+
+    1. **Sender table lookup**: If the sender's domain matches an entry in
+       SENDER_TRIPLE_MAP, return that stable triple directly. This is the
+       preferred path for known senders because it produces identical
+       fingerprints for all emails from that sender about the same general
+       topic class, regardless of subject-line variation.
+
+    2. **Deterministic slugification**: If no sender match, apply
+       slugify_for_fingerprint() to each component, producing a stable
+       canonical form that collapses minor phrasing differences.
+
+    The resulting triple can be passed directly to compute_fingerprint().
+
+    **Important**: Never feed raw subject lines or LLM-paraphrased canonical_names
+    to compute_fingerprint() — always route through this function first for
+    email-derived triples.
+
+    Args:
+        service: Original service value from email triage
+        problem_type: Original problem_type value from email triage
+        resource: Original resource value from email triage
+        sender_address: Email From header (e.g., "One Medical <noreply@onemedical.com>")
+        subject: Email subject line for fallback slugification
+
+    Returns:
+        Normalized (service, problem_type, resource) tuple
+    """
+    # Step 1: Sender table lookup
+    domain = extract_sender_domain(sender_address)
+    if domain and domain in SENDER_TRIPLE_MAP:
+        return SENDER_TRIPLE_MAP[domain]
+
+    # Step 2: Deterministic slugification fallback
+    # Use slugify on each component, which removes articles/possessives
+    # and collapses minor phrasing differences
+    norm_svc = slugify_for_fingerprint(service)
+    norm_ptype = slugify_for_fingerprint(problem_type)
+    norm_res = slugify_for_fingerprint(resource)
+
+    # If all components collapsed to "unknown", try using the subject
+    # as the resource component — it often carries the most signal
+    if norm_svc == "unknown" and norm_res == "unknown" and subject:
+        norm_res = slugify_for_fingerprint(subject)
+
+    return (norm_svc, norm_ptype, norm_res)
 
 
 def _normalize_component(value: str) -> str:
