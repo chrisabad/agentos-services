@@ -9,8 +9,6 @@ This is what end-to-end closes the One Medical DM storm class of bug.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 from fastapi.testclient import TestClient
 
