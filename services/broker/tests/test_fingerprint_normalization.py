@@ -13,6 +13,7 @@ from __future__ import annotations
 from services.broker.fingerprint import (
     compute_fingerprint,
     extract_sender_domain,
+    normalize_triple_for_agent_topic,
     normalize_triple_for_email,
     slugify_for_fingerprint,
     SENDER_TRIPLE_MAP,
@@ -336,3 +337,90 @@ def test_different_senders_different_fingerprints():
         sender_address="noreply@spotify.com", subject="billing",
     ))
     assert fp1 != fp2
+
+# ── normalize_triple_for_agent_topic (AGE-13745) ──────────────
+
+
+def test_legalzoom_variants_collapse_to_single_fingerprint():
+    """AGE-13745 reference case: three observed LegalZoom canonical names
+    from 2026-05-11 ledger.json must produce a SINGLE fingerprint after
+    normalize_triple_for_agent_topic."""
+    variants = [
+        # (service, problem_type, resource) — from actual ledger entries
+        ("font-replacer", "deadline-reminder", "FON-185-legalzoom"),
+        ("fon", "legalzoom-deadline", "de-annual-tax-statement"),
+        ("fon", "compliance", "LegalZoom DE Annual Tax Statement"),
+        ("font-replacer-llc", "delaware-annual-tax", "legalzoom-filing"),
+    ]
+    fingerprints = {
+        compute_fingerprint(*normalize_triple_for_agent_topic(*v))
+        for v in variants
+    }
+    assert len(fingerprints) == 1, (
+        f"Expected 1 unique fingerprint for LegalZoom variants, got {len(fingerprints)}: {fingerprints}"
+    )
+
+
+def test_slack_token_variants_collapse():
+    """Slack bot token expiry across companies should collapse."""
+    variants = [
+        ("slack", "token-expired", "FON-1313-bot"),
+        ("slack", "token-invalid", "font-replacer-slack-app"),
+        ("font-replacer", "slack-bot-token", "expired"),
+    ]
+    fingerprints = {
+        compute_fingerprint(*normalize_triple_for_agent_topic(*v))
+        for v in variants
+    }
+    assert len(fingerprints) == 1
+
+
+def test_queue_health_variants_collapse():
+    """Queue-health sweep variants from 'queue healthy' status checks."""
+    variants = [
+        ("juno", "queue-healthy", "paperclip-sweep"),
+        ("juno", "sweep-complete", "queue-health-check"),
+    ]
+    fingerprints = {
+        compute_fingerprint(*normalize_triple_for_agent_topic(*v))
+        for v in variants
+    }
+    assert len(fingerprints) == 1
+
+
+def test_unmapped_topic_falls_back_to_slugify():
+    """Topics not in TOPIC_TRIPLE_MAP should still normalize via slugify."""
+    # Same underlying topic phrased differently — should collapse via slugify alone
+    fp1 = compute_fingerprint(*normalize_triple_for_agent_topic(
+        "some-service", "your random problem", "unique-resource",
+    ))
+    fp2 = compute_fingerprint(*normalize_triple_for_agent_topic(
+        "some-service", "the random problem", "unique-resource",
+    ))
+    # slugify_for_fingerprint strips "your" and "the" — so they should match
+    assert fp1 == fp2
+
+
+def test_unrelated_topics_do_not_collapse():
+    """TOPIC_TRIPLE_MAP must not over-collapse — unrelated topics keep separate fingerprints."""
+    fp_legalzoom = compute_fingerprint(*normalize_triple_for_agent_topic(
+        "fon", "legalzoom-deadline", "delaware",
+    ))
+    fp_slack = compute_fingerprint(*normalize_triple_for_agent_topic(
+        "slack", "token-expired", "font-replacer-bot",
+    ))
+    fp_queue = compute_fingerprint(*normalize_triple_for_agent_topic(
+        "juno", "queue-healthy", "paperclip",
+    ))
+    fp_random = compute_fingerprint(*normalize_triple_for_agent_topic(
+        "some-other-service", "some-other-problem", "some-other-resource",
+    ))
+    fingerprints = {fp_legalzoom, fp_slack, fp_queue, fp_random}
+    assert len(fingerprints) == 4, "TOPIC_TRIPLE_MAP over-collapsed unrelated topics"
+
+
+def test_topic_triple_map_returns_canonical_for_legalzoom():
+    """Verify TOPIC_TRIPLE_MAP entry shape: matching tokens → stable canonical triple."""
+    result = normalize_triple_for_agent_topic("fon", "legalzoom-deadline", "delaware-annual-tax")
+    # Should return the canonical triple from the map
+    assert result == ("compliance", "legalzoom-deadline", "delaware-annual-tax")

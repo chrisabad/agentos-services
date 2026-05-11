@@ -55,12 +55,14 @@ def decay_tier(current: str) -> str:
 # preserves the override path for those cases.
 
 _CHANNEL_BY_BUSINESS_CATEGORY: dict[tuple[str, str], str] = {
-    # ops alerts go to #agent-ops; financial to #finance; approvals to DM
+    # ops alerts go to #agent-ops; financial to #finance; approvals routed
+    # explicitly. NO DM defaults — DM routing requires an explicit mapping.
     ("age", "ops"): "C0AKKLWGNG4",      # #agent-ops
-    ("age", "approval"): "DM:chris",
+    ("age", "approval"): "DM:chris",    # explicit DM for approval flow only
     ("age", "financial"): "C0AGENTFIN1",
     ("kaleidoscope", "ops"): "C0AGENTOPS",
     ("kaleidoscope", "financial"): "C0AGENTFIN1",
+    ("font_replacer", "ops"): "C0AKKLWGNG4",      # AGE-13744 fix — was falling through to DM:chris
     ("font_replacer", "financial"): "C0AGENTFIN1",
     ("weekend", "ops"): "C0AGENTOPS",
     # personal — all categories route to #general
@@ -70,20 +72,52 @@ _CHANNEL_BY_BUSINESS_CATEGORY: dict[tuple[str, str], str] = {
     ("personal", "household"): "C0GENERAL",
 }
 
+# Per-business fallback channels — used when no (business, category) mapping
+# matches. Explicitly NOT DM:chris — routing to a Chris DM requires the
+# explicit (business, category) → DM:chris mapping above. This avoids the
+# AGE-13744 regression where Font Replacer ops alerts silently fell through
+# to Chris's DM.
 _DEFAULT_CHANNEL_BY_BUSINESS: dict[str, str] = {
-    "age": "DM:chris",
-    "kaleidoscope": "DM:chris",
-    "font_replacer": "DM:chris",
-    "weekend": "DM:chris",
+    "age": "C0AKKLWGNG4",           # #agent-ops
+    "kaleidoscope": "C0AGENTOPS",   # #agent-ops (kaleidoscope workspace)
+    "font_replacer": "C0AKKLWGNG4", # #agent-ops
+    "weekend": "C0AGENTOPS",
     "personal": "C0GENERAL",        # #general — catch-all for personal categories
 }
 
-_GLOBAL_DEFAULT_CHANNEL = "DM:chris"
+# Business name aliases — producers may pass shortened (e.g., "fon") or
+# hyphenated (e.g., "font-replacer") variants. Normalize to canonical form
+# before lookup. Underscore separator collapse happens in resolve_channel.
+_BUSINESS_ALIASES: dict[str, str] = {
+    "fon": "font_replacer",
+    "kal": "kaleidoscope",
+    "wee": "weekend",
+    "pix": "pixelated_path",
+    "stu": "studio",
+    "dia": "diacritic_mining",
+}
+
+# Unknown businesses fall back to #agent-ops, NOT to a Chris DM.
+_GLOBAL_DEFAULT_CHANNEL = "C0AKKLWGNG4"  # #agent-ops
+
+
+def _normalize_business(business: str) -> str:
+    """Normalize a business identifier: lowercase, collapse hyphens to underscores,
+    apply alias map. So 'font-replacer', 'font_replacer', 'Font Replacer', and 'fon'
+    all collapse to 'font_replacer'."""
+    if not business:
+        return ""
+    norm = business.lower().strip().replace("-", "_").replace(" ", "_")
+    return _BUSINESS_ALIASES.get(norm, norm)
 
 
 def resolve_channel(business: str, category: str, surface_tier: str) -> str:
-    """Return the channel to deliver to. Briefs route to brief-specific channels."""
-    business_norm = (business or "").lower()
+    """Return the channel to deliver to. Briefs route to brief-specific channels.
+
+    Business name normalization: hyphens/spaces collapse to underscores, and known
+    short forms (e.g., 'fon' → 'font_replacer') are resolved before lookup.
+    """
+    business_norm = _normalize_business(business)
     category_norm = (category or "").lower()
     if surface_tier == "daily_brief":
         return f"BRIEF:daily:{business_norm or 'general'}"
@@ -378,6 +412,48 @@ def r35_weekend_outbound_filter(topic: dict, ctx: dict) -> tuple[str, str] | Non
     )
 
 
+# ── R36: thin-signal gate for juno_to_chris flow ──────────────────────
+# AGE-13746: enforce as code what the chris-facing-message skill enforced only
+# advisorily. Suppresses Juno-to-Chris messages whose body is a status sweep
+# with no decision required — the messages that R18 misses because they don't
+# match the literal "all clear" markers.
+
+_THIN_SIGNAL_PATTERNS = (
+    re.compile(r"\bqueue\s+(is\s+)?healthy\b", re.IGNORECASE),
+    re.compile(r"\bno\s+(further\s+)?action\s+(required|needed)\b", re.IGNORECASE),
+    re.compile(r"\bno\s+anomalies\s+detected\b", re.IGNORECASE),
+    re.compile(r"\ball\s+systems\s+operational\b", re.IGNORECASE),
+    re.compile(r"\bsweep\s+complete\b", re.IGNORECASE),
+    re.compile(r"\bnothing\s+to\s+report\b", re.IGNORECASE),
+    re.compile(r"\bstatus\s+update[:\-\s]+no\s+changes\b", re.IGNORECASE),
+    re.compile(r"\bstatus\s+update[:\-\s]+unchanged\b", re.IGNORECASE),
+    re.compile(r"\bno\s+issues?\s+to\s+escalate\b", re.IGNORECASE),
+    re.compile(r"\beverything\s+(is\s+)?(running\s+)?(normal|fine|good)\b", re.IGNORECASE),
+)
+
+
+def r36_thin_signal_to_chris(topic: dict, ctx: dict) -> tuple[str, str] | None:
+    """R36: suppress thin-signal status sweeps in juno_to_chris flow.
+
+    Fires only when flow == 'juno_to_chris' AND the message body matches one of
+    the thin-signal patterns. These are messages that pass the broader R18
+    all-clear filter but still shouldn't reach Chris — sweep reports of healthy
+    queues, no-action-required status updates, and similar low-value pings.
+
+    Migrated from the advisory chris-facing-message skill (AGE-13746) — promotes
+    its three-question check from model-discretionary to code-enforced.
+    """
+    if ctx.get("flow") != "juno_to_chris":
+        return None
+    text = ctx.get("message_text") or topic.get("canonical_name") or ""
+    if not text:
+        return None
+    for pattern in _THIN_SIGNAL_PATTERNS:
+        if pattern.search(text):
+            return DECISION_SUPPRESS, "Thin signal — no decision for Chris"
+    return None
+
+
 def r32_recent_duplicate(topic: dict, ctx: dict) -> tuple[str, str] | None:
     """R32: message text seen within the recent-dupe window → suppress.
 
@@ -419,6 +495,7 @@ DEFAULT_RULES: list[tuple[str, Callable[[dict, dict], tuple[str, str] | None]]] 
     ("R32", r32_recent_duplicate),
     ("R33", r33_chris_24h_dedup),
     ("R35", r35_weekend_outbound_filter),
+    ("R36", r36_thin_signal_to_chris),   # AGE-13746 — thin-signal gate for juno_to_chris
     # Topic-state rules
     ("R18", r18_all_clear_messages),
     ("R20", r20_producer_already_acted),

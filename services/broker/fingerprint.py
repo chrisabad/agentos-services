@@ -73,6 +73,48 @@ SENDER_TRIPLE_MAP: dict[str, tuple[str, str, str]] = {
 }
 
 
+# ── Agent-generated topic triple normalization (AGE-13745) ──────
+# Maps tokens in agent-generated triples to stable canonical triples. When an
+# agent fires a notification with an LLM-paraphrased (service, problem_type,
+# resource) triple, we look for known topic-class tokens in the slugified
+# components. A match collapses divergent triples to a single fingerprint.
+#
+# Format: ordered list of (match_tokens, canonical_triple). The match runs
+# in order; the first matching entry wins. match_tokens is a tuple of strings
+# that must ALL appear (as substrings) somewhere in the slugified joined
+# input (service|problem_type|resource). This avoids accidental collapse —
+# requiring multiple matching tokens makes false positives much rarer.
+#
+# Add an entry here when a recurring agent-generated topic produces divergent
+# fingerprints across invocations. The pattern is more durable than fighting
+# LLM phrasing variance.
+TOPIC_TRIPLE_MAP: list[tuple[tuple[str, ...], tuple[str, str, str]]] = [
+    # LegalZoom / Delaware Annual Tax Statement — AGE-13745 reference case
+    # Collapses divergent triples like:
+    #   ("font-replacer", "deadline-reminder", "FON-185-legalzoom")
+    #   ("fon", "legalzoom-deadline", "de-annual-tax-statement")
+    #   ("fon", "compliance", "LegalZoom DE Annual Tax Statement")
+    #   ("font-replacer-llc", "delaware-annual-tax", "legalzoom-filing")
+    # Note: today this assumes any "legalzoom + deadline/tax/delaware" topic
+    # is the Font Replacer LLC Delaware Annual Tax Statement. When other
+    # LegalZoom topics arise (e.g., a different entity's incorporation), the
+    # registry-based topic_class system (Phase 3) provides disambiguation.
+    (("legalzoom", "delaware"), ("compliance", "legalzoom-deadline", "delaware-annual-tax")),
+    (("legalzoom", "annual-tax"), ("compliance", "legalzoom-deadline", "delaware-annual-tax")),
+    (("legalzoom", "de-annual"), ("compliance", "legalzoom-deadline", "delaware-annual-tax")),
+    (("legalzoom", "deadline"), ("compliance", "legalzoom-deadline", "delaware-annual-tax")),
+    (("legalzoom", "tax"), ("compliance", "legalzoom-deadline", "delaware-annual-tax")),
+    (("legalzoom", "filing"), ("compliance", "legalzoom-deadline", "delaware-annual-tax")),
+    # Slack bot token expiry across companies
+    (("slack", "token", "expired"), ("ops", "oauth-expired", "slack-bot-token")),
+    (("slack", "token", "invalid"), ("ops", "oauth-expired", "slack-bot-token")),
+    (("slack-bot-token",), ("ops", "oauth-expired", "slack-bot-token")),
+    # Queue health sweep results
+    (("queue", "healthy"), ("ops", "queue-health-sweep", "paperclip")),
+    (("queue", "sweep", "complete"), ("ops", "queue-health-sweep", "paperclip")),
+]
+
+
 def slugify_for_fingerprint(text: str) -> str:
     """Deterministic slug normalization for fingerprint components.
 
@@ -209,6 +251,55 @@ def normalize_triple_for_email(
         norm_res = slugify_for_fingerprint(subject)
 
     return (norm_svc, norm_ptype, norm_res)
+
+
+def normalize_triple_for_agent_topic(
+    service: str,
+    problem_type: str,
+    resource: str,
+) -> tuple[str, str, str]:
+    """Normalize an agent-generated triple to a stable fingerprint key.
+
+    Agent-internally-generated notifications (e.g., from `claude --print`
+    routine wakes) produce LLM-paraphrased (service, problem_type, resource)
+    triples that vary per invocation. Without normalization, the same
+    underlying topic produces different fingerprints and defeats dedup.
+
+    This function applies two levels of normalization:
+
+    1. **Topic table lookup**: If any entry in TOPIC_TRIPLE_MAP matches the
+       slugified joined input, return that stable canonical triple directly.
+       This is the preferred path for known recurring topics (LegalZoom
+       deadlines, Slack token expiries, queue sweeps).
+
+    2. **Deterministic slugification**: If no topic match, apply
+       slugify_for_fingerprint() to each component, producing a stable
+       canonical form that collapses article/possessive variance.
+
+    **Important**: Use this function for non-email producer paths. The email
+    path uses `normalize_triple_for_email()` which incorporates sender domain.
+
+    Args:
+        service: LLM-generated service component
+        problem_type: LLM-generated problem_type component
+        resource: LLM-generated resource component
+
+    Returns:
+        Normalized (service, problem_type, resource) tuple
+    """
+    # Step 1: Topic table lookup — match slugified joined input against
+    # each entry's match_tokens. All tokens must be present (as substrings).
+    slugged_join = "|".join(slugify_for_fingerprint(c) for c in (service, problem_type, resource))
+    for match_tokens, canonical_triple in TOPIC_TRIPLE_MAP:
+        if all(tok in slugged_join for tok in match_tokens):
+            return canonical_triple
+
+    # Step 2: Deterministic slugification fallback
+    return (
+        slugify_for_fingerprint(service),
+        slugify_for_fingerprint(problem_type),
+        slugify_for_fingerprint(resource),
+    )
 
 
 def _normalize_component(value: str) -> str:

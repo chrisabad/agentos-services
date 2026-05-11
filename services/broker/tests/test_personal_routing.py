@@ -71,5 +71,11 @@ def test_age_ops_still_routes_to_agent_ops():
     assert resolve_channel("age", "ops", "immediate") == "C0AKKLWGNG4"
 
 
-def test_kaleidoscope_default_still_dm_chris():
-    assert resolve_channel("kaleidoscope", "unknown_category", "immediate") == "DM:chris"
+def test_kaleidoscope_default_routes_to_agent_ops():
+    """AGE-13744: per-business defaults are now #agent-ops, not DM:chris.
+
+    Routing to a Chris DM requires an explicit (business, category) mapping;
+    defaults and global fallback land in #agent-ops so they can be audited
+    and the registry corrected.
+    """
+    assert resolve_channel("kaleidoscope", "unknown_category", "immediate") == "C0AGENTOPS"
