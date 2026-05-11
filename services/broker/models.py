@@ -20,6 +20,8 @@ class BrokerCheckRequest(BaseModel):
     context: dict = Field(default_factory=dict)
     surface_tier: Literal["immediate", "daily_brief", "weekly_brief", "muted"] = "immediate"
     dry_run: bool = False
+    sender_address: str = Field(default="", description="Email From header; when present, broker auto-normalizes the (service,problem_type,resource) triple via normalize_triple_for_email")
+    subject: str = Field(default="", description="Email Subject header; used by auto-normalize when sender_address is present")
 
 
 class BrokerCheckResponse(BaseModel):

@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 
 from services.broker.broker import AttentionBroker
-from services.broker.fingerprint import compute_fingerprint
+from services.broker.fingerprint import compute_fingerprint, normalize_triple_for_email
 from services.broker.ledger import get_topic, load_ledger
 from services.broker.models import (
     BrokerCheckRequest,
@@ -71,11 +71,26 @@ def create_app() -> FastAPI:
 
     @app.post("/broker/check", response_model=BrokerCheckResponse)
     async def broker_check(req: BrokerCheckRequest):
-        try:
-            result = broker.check(
+        # AGE-13691: when sender_address (or subject) is provided, auto-apply
+        # normalize_triple_for_email so callers can pass raw email metadata and
+        # the broker handles fingerprint stability. Known senders collapse to
+        # canonical triples via SENDER_TRIPLE_MAP; unknown senders pass through
+        # slugified deterministically.
+        if req.sender_address or req.subject:
+            service, problem_type, resource = normalize_triple_for_email(
                 service=req.service,
                 problem_type=req.problem_type,
                 resource=req.resource,
+                sender_address=req.sender_address,
+                subject=req.subject,
+            )
+        else:
+            service, problem_type, resource = req.service, req.problem_type, req.resource
+        try:
+            result = broker.check(
+                service=service,
+                problem_type=problem_type,
+                resource=resource,
                 canonical_name=req.canonical_name,
                 flow=req.flow,
                 consumer=req.consumer,
