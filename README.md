@@ -102,3 +102,5 @@ PAPERCLIP_BOARD_KEY=... .venv/bin/python tools/soak.py --minutes 30 --rps 1.0
 ## Adding a new service
 
 When Phase 1 (broker) and Phase 2 (ingestion) land, add `services/broker/` and `services/ingestion/` packages following the same shape as `services/memory/`. Each gets its own plist in `deploy/` and its own port. Auth + config patterns are shared.
+
+<!-- AGE-13670: autonomous SDLC verified via ellis-agentos review path on 2026-05-11. -->
