@@ -140,7 +140,7 @@ def resolve(
                 safety_violation=True,
                 notes=f"override {override_channel!r} refused (DM not in allowlist)",
             )
-        return Resolution(channel=resolved, rule_id="override", notes=f"explicit override")
+        return Resolution(channel=resolved, rule_id="override", notes="explicit override")
 
     business_norm = cfg.normalize_business(business)
     tier_norm = (tier or "immediate").lower()
