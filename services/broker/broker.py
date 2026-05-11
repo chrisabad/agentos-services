@@ -23,7 +23,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from services.broker.fingerprint import compute_fingerprint, name_similarity
+from services.broker.fingerprint import (
+    compute_fingerprint,
+    name_similarity,
+    normalize_triple_for_agent_topic,
+    normalize_triple_for_email,
+)
 from services.broker.ledger import (
     load_ledger, save_ledger, upsert_topic, transition_topic,
     record_surface, add_producer_action, get_topic, prune_resolved,
@@ -112,6 +117,34 @@ class AttentionBroker:
         else:
             save_ledger(ledger)
 
+    def _normalized_fingerprint(
+        self,
+        service: str,
+        problem_type: str,
+        resource: str,
+        ctx: Optional[dict] = None,
+    ) -> str:
+        """Compute a fingerprint with appropriate pre-normalization.
+
+        Email-derived signals (sender_address in context) route through
+        `normalize_triple_for_email` (sender domain + slugify). All other
+        producer paths route through `normalize_triple_for_agent_topic`
+        (TOPIC_TRIPLE_MAP + slugify). Both collapse LLM-paraphrased variants
+        of the same underlying topic to a single canonical fingerprint
+        (AGE-13745).
+        """
+        ctx = ctx or {}
+        sender_address = ctx.get("sender_address") or ""
+        if sender_address:
+            norm = normalize_triple_for_email(
+                service, problem_type, resource,
+                sender_address=sender_address,
+                subject=ctx.get("subject") or "",
+            )
+        else:
+            norm = normalize_triple_for_agent_topic(service, problem_type, resource)
+        return compute_fingerprint(*norm)
+
     def check(
         self,
         service: str,
@@ -151,7 +184,7 @@ class AttentionBroker:
         biz = business or service
 
         # ── STEP 1: FINGERPRINT ──────────────────────────────────────
-        fp = compute_fingerprint(service, problem_type, resource)
+        fp = self._normalized_fingerprint(service, problem_type, resource, ctx)
 
         ledger = self._load()
         topic = get_topic(ledger, fp)
@@ -338,7 +371,7 @@ class AttentionBroker:
 
         Returns True if the topic exists and the action was recorded.
         """
-        fp = compute_fingerprint(service, problem_type, resource)
+        fp = self._normalized_fingerprint(service, problem_type, resource)
         ledger = self._load()
         topic = get_topic(ledger, fp)
         if topic is None:
@@ -357,7 +390,7 @@ class AttentionBroker:
         Call this when Chris responds to a Juno message, or when Juno handles
         an agent escalation (posts a comment, changes issue status, approves plan).
         """
-        fp = compute_fingerprint(service, problem_type, resource)
+        fp = self._normalized_fingerprint(service, problem_type, resource)
         ledger = self._load()
         topic = get_topic(ledger, fp)
         if topic is None:
@@ -375,7 +408,7 @@ class AttentionBroker:
     def resolve(self, service: str, problem_type: str, resource: str,
                 source: str = "explicit", evidence: str = "") -> bool:
         """Mark a topic as fully resolved."""
-        fp = compute_fingerprint(service, problem_type, resource)
+        fp = self._normalized_fingerprint(service, problem_type, resource)
         ledger = self._load()
         topic = get_topic(ledger, fp)
         if topic is None:
@@ -393,7 +426,7 @@ class AttentionBroker:
     def mute(self, service: str, problem_type: str, resource: str,
              until_iso: Optional[str] = None) -> bool:
         """Mute a topic, optionally with an expiry."""
-        fp = compute_fingerprint(service, problem_type, resource)
+        fp = self._normalized_fingerprint(service, problem_type, resource)
         ledger = self._load()
         topic = get_topic(ledger, fp)
         if topic is None:
