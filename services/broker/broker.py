@@ -151,7 +151,14 @@ class AttentionBroker:
         biz = business or service
 
         # ── STEP 1: FINGERPRINT ──────────────────────────────────────
-        fp = compute_fingerprint(service, problem_type, resource)
+        # Extract sender/subject from context for fingerprint normalization.
+        # These are populated by the email-triage path and enable stable
+        # fingerprinting even when the LLM paraphrases topic names differently.
+        fp_sender = ctx.get("sender", "")
+        fp_subject = ctx.get("subject", "")
+        fp_body = ctx.get("body", "")
+        fp = compute_fingerprint(service, problem_type, resource,
+                                 sender=fp_sender, subject=fp_subject, body=fp_body)
 
         ledger = self._load()
         topic = get_topic(ledger, fp)
