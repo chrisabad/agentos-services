@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agentos.notifications-service</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>cd "$HOME/repos/agentos-services" &amp;&amp; exec "$HOME/repos/agentos-services/.venv/bin/uvicorn" services.notifications.app:app --host 127.0.0.1 --port 8012</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/openclaw/.agentos/logs/notifications-service.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/openclaw/.agentos/logs/notifications-service.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/openclaw/repos/agentos-services</string>
+</dict>
+</plist>
