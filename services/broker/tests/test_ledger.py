@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 
 import pytest
 
 from services.broker import ledger
+
+
+_NOW_ISO = datetime.now(timezone.utc).isoformat()
 
 
 @pytest.fixture
@@ -27,7 +31,7 @@ def _new_topic(fp: str = "fp1", **overrides) -> dict:
         "related_issue_ids": [],
         "related_thread_ids": [],
         "state": "triggered",
-        "first_seen": "2026-05-02T20:00:00+00:00",
+        "first_seen": _NOW_ISO,
         "last_surfaced": None,
         "surface_count": 0,
         "surface_tier": "immediate",
@@ -36,7 +40,7 @@ def _new_topic(fp: str = "fp1", **overrides) -> dict:
         "disposition_evidence": None,
         "producer_actions": [],
         "muted_until": None,
-        "last_state_change": "2026-05-02T20:00:00+00:00",
+        "last_state_change": _NOW_ISO,
     }
     base.update(overrides)
     return base
