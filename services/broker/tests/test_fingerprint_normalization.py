@@ -17,7 +17,6 @@ from services.broker.fingerprint import (
     normalize_triple_for_email,
     slugify_for_fingerprint,
     SENDER_TRIPLE_MAP,
-    TOPIC_TRIPLE_MAP,
 )
 
 
