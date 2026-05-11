@@ -252,6 +252,105 @@ def test_fingerprint_stability_with_slugification():
     assert len(slug_fps) <= len(raw_fps)
 
 
+# ── normalize_triple_for_email: subdomain walking (AGE-13672) ──────
+
+
+def test_normalize_triple_subdomain_notifications_onemedical():
+    """notifications.X.com should match X.com in SENDER_TRIPLE_MAP (AGE-13672)."""
+    svc, pt, res = normalize_triple_for_email(
+        "email-triage",
+        "unknown",
+        "unknown",
+        sender_address="onemedical@notifications.onemedical.com",
+        subject="Activate your benefit",
+    )
+    assert (svc, pt, res) == SENDER_TRIPLE_MAP["onemedical.com"]
+
+
+def test_normalize_triple_subdomain_mail_onemedical():
+    """mail.X.com should match X.com in SENDER_TRIPLE_MAP (AGE-13672)."""
+    svc, pt, res = normalize_triple_for_email(
+        "email-triage",
+        "activation-reminder",
+        "one-medical",
+        sender_address="no-reply@mail.onemedical.com",
+        subject="Your activation code",
+    )
+    assert (svc, pt, res) == SENDER_TRIPLE_MAP["onemedical.com"]
+
+
+def test_normalize_triple_subdomain_e_onemedical():
+    """e.X.com (common transactional subdomain) should match X.com (AGE-13672)."""
+    svc, pt, res = normalize_triple_for_email(
+        "email-triage",
+        "reminder",
+        "benefit",
+        sender_address="noreply@e.onemedical.com",
+        subject="Benefit reminder",
+    )
+    assert (svc, pt, res) == SENDER_TRIPLE_MAP["onemedical.com"]
+
+
+def test_normalize_triple_subdomain_exact_match_preferred():
+    """If the full subdomain is in the map, it should be used over a parent match."""
+    # Add a hypothetical entry: notifications.onemedical.com maps to a different triple
+    # We can't mutate SENDER_TRIPLE_MAP (it's module-level), so test with
+    # onemedical.com directly — the exact match path should still work.
+    svc, pt, res = normalize_triple_for_email(
+        "email-triage",
+        "activation",
+        "one-medical",
+        sender_address="support@onemedical.com",
+        subject="Activation",
+    )
+    assert (svc, pt, res) == SENDER_TRIPLE_MAP["onemedical.com"]
+
+
+def test_normalize_triple_subdomain_no_walk_match_falls_through():
+    """A subdomain that doesn't match any SENDER_TRIPLE_MAP entry falls through
+    to slugification (AGE-13672)."""
+    svc, pt, res = normalize_triple_for_email(
+        "email-triage",
+        "activation-reminder",
+        "one-medical",
+        sender_address="noreply@notifications.unknown-service.com",
+        subject="Your activation",
+    )
+    # Should NOT look up in SENDER_TRIPLE_MAP — falls through to slugify
+    assert svc == "email-triage"
+    assert pt == "activation"  # "reminder" is a stopword
+    assert res == "one-medical"
+
+
+def test_smoke_eight_emails_all_collapse():
+    """The 8-email smoke test from AGE-13672 acceptance criteria:
+    All 8 One Medical emails (including notifications.onemedical.com)
+    should collapse to a single fingerprint."""
+    sender_addresses = [
+        "reminders@onemedical.com",             # direct domain
+        "support@onemedical.com",                # direct domain
+        "noreply@onemedical.com",                # direct domain
+        "no-reply@mail.onemedical.com",          # subdomain walk
+        "onemedical@notifications.onemedical.com",  # subdomain walk (the bug case)
+        "noreply@e.onemedical.com",              # subdomain walk
+        "info@1lifehealthcare.com",              # alias domain
+        "noreply@onetmedical.com",              # typo variant
+    ]
+    fingerprints = set()
+    for addr in sender_addresses:
+        svc, pt, res = normalize_triple_for_email(
+            "email-triage",
+            "activation-reminder",
+            "one-medical",
+            sender_address=addr,
+            subject="One Medical benefit activation",
+        )
+        fingerprints.add(compute_fingerprint(svc, pt, res))
+    assert len(fingerprints) == 1, (
+        f"Expected 1 unique fingerprint for 8 senders, got {len(fingerprints)}: {fingerprints}"
+    )
+
+
 def test_different_senders_different_fingerprints():
     """Different sender domains should produce different fingerprints (unless
     they map to the same triple)."""

@@ -184,10 +184,21 @@ def normalize_triple_for_email(
     Returns:
         Normalized (service, problem_type, resource) tuple
     """
-    # Step 1: Sender table lookup
+    # Step 1: Sender table lookup (with subdomain walking)
+    # AGE-13672: A sender like notifications.X.com needs to match X.com in
+    # SENDER_TRIPLE_MAP. Walk subdomain candidates from most-specific to
+    # least-specific, returning the first match.
     domain = extract_sender_domain(sender_address)
-    if domain and domain in SENDER_TRIPLE_MAP:
-        return SENDER_TRIPLE_MAP[domain]
+    if domain:
+        if domain in SENDER_TRIPLE_MAP:
+            return SENDER_TRIPLE_MAP[domain]
+        # Subdomain walk: e.g. notifications.onemedical.com → try
+        # notifications.onemedical.com, onemedical.com
+        parts = domain.split(".")
+        for i in range(len(parts) - 1):
+            candidate = ".".join(parts[i + 1:])
+            if candidate in SENDER_TRIPLE_MAP:
+                return SENDER_TRIPLE_MAP[candidate]
 
     # Step 2: Deterministic slugification fallback
     # Use slugify on each component, which removes articles/possessives
