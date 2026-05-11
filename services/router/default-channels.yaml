@@ -1,0 +1,144 @@
+# Default channel router config (AGE-13741, CFC Phase 6).
+#
+# This is the embedded default — production config lives in
+# agentos-config/router/channels.yaml and overrides this when present.
+#
+# Rules:
+#  - default_channel is the GLOBAL fallback for unknown topic_class. NEVER a DM.
+#  - dm_allowlist enumerates the only topic_classes allowed to resolve to a DM.
+#    Anything not in the allowlist with a DM:* mapping is a config bug — the
+#    resolve() function refuses to deliver and falls back to default_channel.
+
+# Symbolic channel name → Slack channel ID
+channels:
+  agent-ops:    C0AKKLWGNG4   # #agent-ops (kaleidoscope workspace)
+  money:        C0AKKLV97PE   # #money (kaleidoscope workspace)
+  weekend:      C0AM14ARE7N   # #weekend (kaleidoscope workspace)
+  general:      C0GENERAL     # #general fallback for personal lane
+  agent-ops-kal: C0AGENTOPS   # legacy alias retained for backwards compat
+
+# Brief channels — synthetic targets the notification service drains into digests
+brief_channels:
+  daily:
+    age:          "BRIEF:daily:age"
+    font_replacer: "BRIEF:daily:font_replacer"
+    kaleidoscope:  "BRIEF:daily:kaleidoscope"
+    weekend:       "BRIEF:daily:weekend"
+    personal:      "BRIEF:daily:personal"
+  weekly:
+    age:          "BRIEF:weekly:age"
+    font_replacer: "BRIEF:weekly:font_replacer"
+    kaleidoscope:  "BRIEF:weekly:kaleidoscope"
+    weekend:       "BRIEF:weekly:weekend"
+    personal:      "BRIEF:weekly:personal"
+
+# Topic-class routing — primary decision surface
+# Each entry can specify:
+#   default:                channel for any business at immediate tier
+#   per_business:           override per business at immediate tier
+#   daily_brief, weekly_brief: override brief channel for that tier; null = explicit suppress
+topic_classes:
+
+  # Compliance / legal
+  legalzoom-deadline:
+    default: money
+  state-filing-deadline:
+    default: money
+  irs-notice:
+    default: money
+  legal-counsel-request:
+    default: money
+
+  # Ops / infra
+  slack-token-expired:
+    default: agent-ops
+  oauth-token-expired:
+    default: agent-ops
+  gateway-down:
+    default: agent-ops
+  agent-stuck-in-progress:
+    default: agent-ops
+  paperclip-issue-stale:
+    default: agent-ops
+  cron-failure:
+    default: agent-ops
+  deploy-failure:
+    default: agent-ops
+  service-restart:
+    default: agent-ops
+
+  # Financial
+  llm-cost-spike:
+    default: money
+  accounting-reply-overdue:
+    default: money
+  vendor-invoice-due:
+    default: money
+  subscription-renewal:
+    default: money
+  mrr-anomaly:
+    default: money
+
+  # Email & external
+  email-actionable:
+    default: agent-ops
+  email-thread-stale:
+    default: agent-ops
+  external-meeting-prep:
+    default: agent-ops
+
+  # Approvals
+  hire-request:
+    default: agent-ops
+  budget-approval:
+    default: money
+  architecture-decision:
+    default: agent-ops
+  merge-elevation:
+    default: agent-ops
+
+  # System-generated
+  queue-health-sweep:
+    default: agent-ops
+    daily_brief: agent-ops
+    weekly_brief: agent-ops
+  report-draft-ready:
+    default: agent-ops
+  report-correction:
+    default: agent-ops
+
+  # Reports
+  notification-quality-weekly:
+    default: agent-ops
+  business-weekly-summary:
+    default: agent-ops
+    per_business:
+      weekend: weekend
+      font_replacer: agent-ops
+  font-replacer-mrr-monthly:
+    default: money
+  agent-fleet-monthly:
+    default: agent-ops
+  xero-monthly-close:
+    default: money
+  ad-hoc-summary:
+    default: agent-ops
+
+# Fallback when topic_class is missing or unknown.
+# Explicitly NOT a DM. Anything that lacks a topic_class lands in #agent-ops
+# so we can audit and add it to the registry.
+default_channel: agent-ops
+
+# Business name aliases — collapse to canonical form before lookup.
+# Mirrors the broker's _BUSINESS_ALIASES introduced in AGE-13744.
+business_aliases:
+  fon: font_replacer
+  kal: kaleidoscope
+  wee: weekend
+  pix: pixelated_path
+  stu: studio
+  dia: diacritic_mining
+
+# DM allowlist — the ONLY topic_classes that may resolve to a DM target.
+# No entries today. Add only with explicit Chris approval per topic.
+dm_allowlist: []
