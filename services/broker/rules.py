@@ -12,6 +12,11 @@ sources: the 8 critical-path rules ported in Phase 1.1, and the 4 hard-block
 content rules migrated from `kaleidoscope-policy/index.js` steps 1-4 (R29-R32,
 Phase 1.1b — see AGE-12132).
 
+Channel routing includes a `personal` business lane: all personal categories
+(benefits, health, finance, household, and any unknown) route to #general
+(C0GENERAL). This ensures personal-scope notifications land in a wide-audience
+channel rather than defaulting to DM:chris (AGE-13645).
+
 Channel resolution (`resolve_channel`) and tier decay (`decay_tier`) are
 also kept here since they're rule-adjacent and used directly by broker.py.
 """
@@ -58,6 +63,11 @@ _CHANNEL_BY_BUSINESS_CATEGORY: dict[tuple[str, str], str] = {
     ("kaleidoscope", "financial"): "C0AGENTFIN1",
     ("font_replacer", "financial"): "C0AGENTFIN1",
     ("weekend", "ops"): "C0AGENTOPS",
+    # personal — all categories route to #general
+    ("personal", "benefits"): "C0GENERAL",    # #general
+    ("personal", "health"): "C0GENERAL",
+    ("personal", "finance"): "C0GENERAL",
+    ("personal", "household"): "C0GENERAL",
 }
 
 _DEFAULT_CHANNEL_BY_BUSINESS: dict[str, str] = {
@@ -65,6 +75,7 @@ _DEFAULT_CHANNEL_BY_BUSINESS: dict[str, str] = {
     "kaleidoscope": "DM:chris",
     "font_replacer": "DM:chris",
     "weekend": "DM:chris",
+    "personal": "C0GENERAL",        # #general — catch-all for personal categories
 }
 
 _GLOBAL_DEFAULT_CHANNEL = "DM:chris"
