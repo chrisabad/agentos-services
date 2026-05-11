@@ -15,6 +15,7 @@ dependencies = [
   "uvicorn[standard]>=0.32",
   "pydantic>=2.9",
   "python-dotenv>=1.0",
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +32,10 @@ include = ["services*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["services/memory/tests", "services/broker/tests", "services/feedback/tests"]
+testpaths = ["services/memory/tests", "services/broker/tests", "services/feedback/tests", "services/router/tests"]
+
+[tool.setuptools.package-data]
+"services.router" = ["*.yaml"]
 
 [tool.ruff]
 line-length = 100
