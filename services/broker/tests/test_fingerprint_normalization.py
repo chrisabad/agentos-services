@@ -252,6 +252,77 @@ def test_fingerprint_stability_with_slugification():
     assert len(slug_fps) <= len(raw_fps)
 
 
+def test_normalize_triple_subdomain_sender_matches_base_domain():
+    """Subdomain senders like notifications.onemedical.com should match
+    the onemedical.com entry in SENDER_TRIPLE_MAP (AGE-13672)."""
+    # notifications.X.com — the case that originally triggered the bug
+    svc, pt, res = normalize_triple_for_email(
+        "email-triage",
+        "unknown",
+        "unknown",
+        sender_address="onemedical@notifications.onemedical.com",
+        subject="One Medical activation code",
+    )
+    assert (svc, pt, res) == SENDER_TRIPLE_MAP["onemedical.com"]
+
+
+def test_normalize_triple_deep_subdomain_walk():
+    """Deeply nested subdomains like mail.e.onemedical.com should walk
+    down to onemedical.com."""
+    svc, pt, res = normalize_triple_for_email(
+        "email-triage",
+        "activation-reminder",
+        "one-medical",
+        sender_address="noreply@mail.e.onemedical.com",
+        subject="Activate your membership",
+    )
+    assert (svc, pt, res) == SENDER_TRIPLE_MAP["onemedical.com"]
+
+
+def test_normalize_triple_exact_domain_match_preferred():
+    """When an exact domain key exists (e.g. onemedical.com), the walk
+    should find it directly without needing to strip subdomains."""
+    svc, pt, res = normalize_triple_for_email(
+        "email-triage",
+        "activation",
+        "one-medical",
+        sender_address="noreply@onemedical.com",
+        subject="Activation",
+    )
+    assert (svc, pt, res) == SENDER_TRIPLE_MAP["onemedical.com"]
+
+
+def test_fingerprint_subdomain_sender_collapses_to_same_fingerprint():
+    """All 8 One Medical emails from the original smoke test, including
+    the one from notifications.onemedical.com, should produce the same
+    fingerprint (AGE-13672 acceptance criterion)."""
+    fingerprints = []
+    senders_and_subjects = [
+        ("onemedical@notifications.onemedical.com", "One Medical benefit activation code VOLLXOM"),
+        ("reminders@onemedical.com", "One Medical health benefit activation reminder"),
+        ("support@onemedical.com", "One Medical membership activation reminder"),
+        ("noreply@onemedical.com", "Activate Weekend One Medical health benefit"),
+        ("alerts@mail.onemedical.com", "One Medical activation code ready"),
+        ("no-reply@e.onemedical.com", "One Medical health benefit activation needed"),
+        ("info@1lifehealthcare.com", "One Medical benefit activation code"),
+        ("news@onetmedical.com", "onemedical_activate_health_benefit"),
+    ]
+    for sender, subject in senders_and_subjects:
+        svc, pt, res = normalize_triple_for_email(
+            "email-triage",
+            "activation-reminder",
+            "one-medical",
+            sender_address=sender,
+            subject=subject,
+        )
+        fingerprints.append(compute_fingerprint(svc, pt, res))
+
+    # All 8 must produce the same fingerprint (was 7/8 before fix)
+    assert len(set(fingerprints)) == 1, (
+        f"Expected 1 unique fingerprint, got {len(set(fingerprints))}: {set(fingerprints)}"
+    )
+
+
 def test_different_senders_different_fingerprints():
     """Different sender domains should produce different fingerprints (unless
     they map to the same triple)."""
