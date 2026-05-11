@@ -34,7 +34,7 @@ include = ["services*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["services/memory/tests", "services/broker/tests", "services/feedback/tests", "services/router/tests", "services/reports/tests"]
+testpaths = ["services/memory/tests", "services/broker/tests", "services/feedback/tests", "services/router/tests", "services/reports/tests", "services/notifications/tests"]
 
 [tool.setuptools.package-data]
 "services.router" = ["*.yaml"]
