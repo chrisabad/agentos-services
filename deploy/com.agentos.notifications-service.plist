@@ -9,7 +9,7 @@
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>cd "$HOME/repos/agentos-services" &amp;&amp; exec "$HOME/repos/agentos-services/.venv/bin/uvicorn" services.notifications.app:app --host 127.0.0.1 --port 8012</string>
+        <string>source "$HOME/.agentos/services.env" 2>/dev/null; cd "$HOME/repos/agentos-services" &amp;&amp; exec "$HOME/repos/agentos-services/.venv/bin/uvicorn" services.notifications.app:app --host 127.0.0.1 --port 8012</string>
     </array>
 
     <key>EnvironmentVariables</key>
