@@ -1,21 +1,33 @@
 #!/usr/bin/env bash
-# launchctl-load.sh — idempotent loader for com.agentos.memory-service
-# Usage: bash deploy/launchctl-load.sh
+# launchctl-load.sh — idempotent loader for all agentos-services
+# Usage: bash deploy/launchctl-load.sh [service...]
+#   service: memory | notifications | reports | broker (default: memory notifications reports)
+#
+# Creates ~/.agentos/services.env if missing. Populate it with:
+#   export PAPERCLIP_BOARD_KEY=pcp_board_...
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLIST_SRC="$REPO_ROOT/deploy/com.agentos.memory-service.plist"
-PLIST_DEST="$HOME/Library/LaunchAgents/com.agentos.memory-service.plist"
 LOG_DIR="$HOME/.agentos/logs"
 VENV_DIR="$REPO_ROOT/.venv"
+SERVICES_ENV="$HOME/.agentos/services.env"
 
 uid="$(id -u)"
 domain="gui/$uid"
-label="com.agentos.memory-service"
 
 mkdir -p "$LOG_DIR"
-mkdir -p "$(dirname "$PLIST_DEST")"
+mkdir -p "$(dirname "$SERVICES_ENV")"
+
+if [ ! -f "$SERVICES_ENV" ]; then
+  echo "[install] WARNING: $SERVICES_ENV not found — creating stub"
+  echo "# agentos-services shared env — sourced by launchd plists at startup" > "$SERVICES_ENV"
+  echo "# Populate PAPERCLIP_BOARD_KEY before starting services" >> "$SERVICES_ENV"
+  echo "export PAPERCLIP_BOARD_KEY=" >> "$SERVICES_ENV"
+  chmod 600 "$SERVICES_ENV"
+  echo "[install] WARNING: set PAPERCLIP_BOARD_KEY in $SERVICES_ENV then re-run"
+  exit 1
+fi
 
 if [ ! -d "$VENV_DIR" ]; then
   echo "[install] creating venv at $VENV_DIR"
@@ -25,12 +37,26 @@ echo "[install] installing project (editable) into $VENV_DIR"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet -e "$REPO_ROOT"
 
-cp "$PLIST_SRC" "$PLIST_DEST"
+ACTIVE_SERVICES=("${@:-memory notifications reports}")
 
-# Bootout if loaded; ignore failure (not loaded yet)
-launchctl bootout "$domain" "$PLIST_DEST" 2>/dev/null || true
-launchctl bootstrap "$domain" "$PLIST_DEST"
-launchctl kickstart -k "$domain/$label"
+for svc in "${ACTIVE_SERVICES[@]}"; do
+  label="com.agentos.$svc-service"
+  plist_src="$REPO_ROOT/deploy/$label.plist"
+  plist_dest="$HOME/Library/LaunchAgents/$label.plist"
 
-echo "[install] $label loaded"
-echo "[install] tail log: tail -f $LOG_DIR/memory-service.log"
+  if [ ! -f "$plist_src" ]; then
+    echo "[install] skipping $svc — no plist at $plist_src"
+    continue
+  fi
+
+  mkdir -p "$(dirname "$plist_dest")"
+  cp "$plist_src" "$plist_dest"
+
+  launchctl bootout "$domain" "$plist_dest" 2>/dev/null || true
+  launchctl bootstrap "$domain" "$plist_dest"
+  launchctl kickstart -k "$domain/$label"
+
+  echo "[install] $label loaded"
+done
+
+echo "[install] done — tail logs: tail -f $LOG_DIR/*.log"
