@@ -37,7 +37,11 @@ echo "[install] installing project (editable) into $VENV_DIR"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet -e "$REPO_ROOT"
 
-ACTIVE_SERVICES=("${@:-memory notifications reports}")
+if [ $# -eq 0 ]; then
+  ACTIVE_SERVICES=(memory notifications reports)
+else
+  ACTIVE_SERVICES=("$@")
+fi
 
 for svc in "${ACTIVE_SERVICES[@]}"; do
   label="com.agentos.$svc-service"
