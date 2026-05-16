@@ -68,6 +68,11 @@ SENDER_TRIPLE_MAP: dict[str, tuple[str, str, str]] = {
     "onemedical.com": ("email-triage", "activation-reminder", "one_medical"),
     "onetmedical.com": ("email-triage", "activation-reminder", "one_medical"),  # typo variant
     "1lifehealthcare.com": ("email-triage", "activation-reminder", "one_medical"),
+    # Bank of America — collection notices, payment alerts (AGE-14231)
+    "bankofamerica.com": ("email-triage", "collection-notice", "bank_of_america"),
+    "bofaclientservices.com": ("email-triage", "collection-notice", "bank_of_america"),
+    "ealerts.bankofamerica.com": ("email-triage", "collection-notice", "bank_of_america"),
+    "online.bankofamerica.com": ("email-triage", "collection-notice", "bank_of_america"),
     # Add more sender domains as they trigger divergent fingerprints.
     # The normalization table is the preferred fix: stable, no LLM variance.
 }
@@ -112,6 +117,15 @@ TOPIC_TRIPLE_MAP: list[tuple[tuple[str, ...], tuple[str, str, str]]] = [
     # Queue health sweep results
     (("queue", "healthy"), ("ops", "queue-health-sweep", "paperclip")),
     (("queue", "sweep", "complete"), ("ops", "queue-health-sweep", "paperclip")),
+    # Font Replacer LLC state filing deadlines (non-LegalZoom) — AGE-14231
+    # Collapses divergent triples like:
+    #   ("font-replacer", "state-filing-deadline", "font-replacer-llc-may17")
+    #   ("fon", "compliance", "Font Replacer LLC state compliance filing")
+    #   ("email-triage", "state-deadline", "font-replacer-state-annual-report")
+    (("state", "filing", "font"), ("compliance", "state-filing-deadline", "font-replacer-llc")),
+    (("state-filing", "font-replacer"), ("compliance", "state-filing-deadline", "font-replacer-llc")),
+    (("secretary", "state", "font"), ("compliance", "state-filing-deadline", "font-replacer-llc")),
+    (("annual-report", "font-replacer"), ("compliance", "state-filing-deadline", "font-replacer-llc")),
 ]
 
 
@@ -238,7 +252,29 @@ def normalize_triple_for_email(
             if candidate in SENDER_TRIPLE_MAP:
                 return SENDER_TRIPLE_MAP[candidate]
 
-    # Step 2: Deterministic slugification fallback
+    # Step 2: Topic table lookup (AGE-13832)
+    # If no sender match, check TOPIC_TRIPLE_MAP for known topic patterns
+    # before falling back to pure slugification. This bridges the gap between
+    # sender-map (exact domain) and slugify (too loose) — known recurring
+    # topics like LegalZoom, Slack tokens, and queue sweeps get proper
+    # collapse even in the email path.
+    # Use slugified joined input (service|problem_type|resource) plus
+    # subject to maximize matching — email subjects often carry topic tokens
+    # that the LLM-paraphrased triple components may not.
+    # Include the sender domain in the match input so that topics like
+    # ("legalzoom", "delaware") can match even when the email triple is empty
+    # but the From address is legalzoom.com and the subject says "Delaware".
+    topic_candidates = (service, problem_type, resource)
+    if subject:
+        topic_candidates = topic_candidates + (subject,)
+    slugged_join = "|".join(slugify_for_fingerprint(c) for c in topic_candidates)
+    if domain:
+        slugged_join = slugged_join + "|" + domain
+    for match_tokens, canonical_triple in TOPIC_TRIPLE_MAP:
+        if all(tok in slugged_join for tok in match_tokens):
+            return canonical_triple
+
+    # Step 3: Deterministic slugification fallback
     # Use slugify on each component, which removes articles/possessives
     # and collapses minor phrasing differences
     norm_svc = slugify_for_fingerprint(service)
