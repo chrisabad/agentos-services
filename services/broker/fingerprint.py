@@ -68,6 +68,11 @@ SENDER_TRIPLE_MAP: dict[str, tuple[str, str, str]] = {
     "onemedical.com": ("email-triage", "activation-reminder", "one_medical"),
     "onetmedical.com": ("email-triage", "activation-reminder", "one_medical"),  # typo variant
     "1lifehealthcare.com": ("email-triage", "activation-reminder", "one_medical"),
+    # Bank of America — collection notices, payment alerts (AGE-14231)
+    "bankofamerica.com": ("email-triage", "collection-notice", "bank_of_america"),
+    "bofaclientservices.com": ("email-triage", "collection-notice", "bank_of_america"),
+    "ealerts.bankofamerica.com": ("email-triage", "collection-notice", "bank_of_america"),
+    "online.bankofamerica.com": ("email-triage", "collection-notice", "bank_of_america"),
     # Add more sender domains as they trigger divergent fingerprints.
     # The normalization table is the preferred fix: stable, no LLM variance.
 }
@@ -112,6 +117,15 @@ TOPIC_TRIPLE_MAP: list[tuple[tuple[str, ...], tuple[str, str, str]]] = [
     # Queue health sweep results
     (("queue", "healthy"), ("ops", "queue-health-sweep", "paperclip")),
     (("queue", "sweep", "complete"), ("ops", "queue-health-sweep", "paperclip")),
+    # Font Replacer LLC state filing deadlines (non-LegalZoom) — AGE-14231
+    # Collapses divergent triples like:
+    #   ("font-replacer", "state-filing-deadline", "font-replacer-llc-may17")
+    #   ("fon", "compliance", "Font Replacer LLC state compliance filing")
+    #   ("email-triage", "state-deadline", "font-replacer-state-annual-report")
+    (("state", "filing", "font"), ("compliance", "state-filing-deadline", "font-replacer-llc")),
+    (("state-filing", "font-replacer"), ("compliance", "state-filing-deadline", "font-replacer-llc")),
+    (("secretary", "state", "font"), ("compliance", "state-filing-deadline", "font-replacer-llc")),
+    (("annual-report", "font-replacer"), ("compliance", "state-filing-deadline", "font-replacer-llc")),
 ]
 
 
