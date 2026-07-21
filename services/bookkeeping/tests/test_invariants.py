@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
 
 from services.bookkeeping.invariants import (
     check_balance_sheet_balances,
@@ -20,7 +19,6 @@ from services.bookkeeping.invariants import (
     check_prior_month_closed,
     run_all_invariants,
     InvariantReport,
-    InvariantResult,
 )
 
 

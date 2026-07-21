@@ -11,10 +11,8 @@ import os
 import tempfile
 from decimal import Decimal
 
-import pytest
 
 from services.bookkeeping.config import (
-    EntityConfig,
     Entity,
     load_config,
     KAL_CHART,
@@ -23,7 +21,6 @@ from services.bookkeeping.categorizer import (
     CategorizationInput,
     CategorizationPipeline,
     CategorizationResult,
-    CategorizationReport,
     ModelCategorizer,
     RuleBasedCategorizer,
     JudgeCategorizer,

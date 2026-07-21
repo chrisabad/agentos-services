@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -17,7 +16,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from .config import EntityConfig, Entity
+from .config import EntityConfig
 
 # ---------------------------------------------------------------------------
 # Types
