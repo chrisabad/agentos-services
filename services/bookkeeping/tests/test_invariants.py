@@ -17,6 +17,7 @@ from services.bookkeeping.invariants import (
     check_no_out_of_period,
     check_category_totals,
     check_prior_month_closed,
+    check_ls_xero_revenue,
     run_all_invariants,
     InvariantReport,
 )
@@ -299,6 +300,83 @@ class TestPriorMonthClosed:
         )
         assert result.passed is False
         assert "not found" in result.summary.lower()
+
+
+# =====================================================================
+# INV08 — LS↔Xero revenue cross-check
+# =====================================================================
+
+
+class TestLSXeroCrossCheck:
+    def test_revenue_matches_within_threshold(self):
+        """LS revenue and Xero sales match closely → pass."""
+        result = check_ls_xero_revenue(
+            ls_revenue_cents=500000,  # $5,000.00
+            xero_sales_total=Decimal("4950.00"),
+            entity="FON",
+        )
+        assert result.passed is True
+        assert "OK" in result.summary
+
+    def test_revenue_large_discrepancy(self):
+        """LS and Xero differ by >$100 → warning."""
+        result = check_ls_xero_revenue(
+            ls_revenue_cents=500000,  # $5,000.00
+            xero_sales_total=Decimal("3500.00"),  # $1,500 diff → > $100 threshold
+            entity="FON",
+        )
+        assert result.passed is False
+        assert "DISCREPANCY" in result.summary
+        assert result.severity == "warning"
+
+    def test_both_zero(self):
+        """Both sides report $0 → info pass."""
+        result = check_ls_xero_revenue(
+            ls_revenue_cents=0,
+            xero_sales_total=Decimal("0"),
+            entity="FON",
+        )
+        assert result.passed is True
+        assert result.severity == "info"
+
+    def test_ls_zero_but_xero_has_revenue(self):
+        """LS shows $0 but Xero has revenue → error (likely missing LS sync)."""
+        result = check_ls_xero_revenue(
+            ls_revenue_cents=0,
+            xero_sales_total=Decimal("5000.00"),
+            entity="FON",
+        )
+        assert result.passed is False
+        assert result.severity == "error"
+        assert "missing" in result.summary.lower()
+
+    def test_inv08_integrated_in_run_all(self):
+        """Verify INV08 is triggered when params provided to run_all."""
+        report = run_all_invariants(
+            entity="FON",
+            total_assets=Decimal("10000"),
+            total_liabilities=Decimal("4000"),
+            total_equity=Decimal("6000"),
+            unreconciled_count=2,
+            unreconciled_threshold=5,
+            current_net=Decimal("500"),
+            previous_net=Decimal("450"),
+            txn_dates=["2026-06-01"],
+            category_totals={"200": Decimal("5000")},
+            statement_totals={"200": Decimal("5000")},
+            balance_sheet_cash=Decimal("5000"),
+            bank_statement_balance=Decimal("5000"),
+            prior_month_summary="May close ok",
+            period_start="2026-06-01",
+            period_end="2026-06-30",
+            ls_revenue_cents=500000,
+            xero_sales_total=Decimal("5000.00"),
+        )
+        assert report.all_passed is True
+        # Find INV08 in results
+        inv08_results = [r for r in report.results if r.name == "INV08_ls_xero_revenue"]
+        assert len(inv08_results) == 1
+        assert inv08_results[0].passed is True
 
 
 # =====================================================================

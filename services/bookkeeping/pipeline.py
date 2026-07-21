@@ -312,6 +312,21 @@ def _run_xero_entity(
     # Prior period net for MoM
     previous_net = _estimate_prior_net(data, config) if prior_month_summary else None
 
+    # LS↔Xero revenue cross-check (Font Replacer only)
+    ls_revenue_cents = None
+    xero_sales_total = None
+    if config.entity_id == "FON":
+        try:
+            from .lemonsqueezy_adapter import LemonSqueezyAdapter
+            ls_adapter = LemonSqueezyAdapter()
+            ls_revenue = ls_adapter.compute_monthly_revenue(start, end)
+            ls_revenue_cents = ls_revenue.subtotal_cents
+            xero_sales_total = category_totals.get("200", Decimal("0"))
+        except Exception as e:
+            # If LS API fails, note it but don't crash the pipeline
+            import logging
+            logging.warning(f"LS↔Xero cross-check failed for FON: {e}")
+
     # Run invariants
     report = run_all_invariants(
         entity=config.entity_id,
@@ -330,6 +345,8 @@ def _run_xero_entity(
         prior_month_summary=prior_month_summary,
         period_start=start.isoformat(),
         period_end=end.isoformat(),
+        ls_revenue_cents=ls_revenue_cents,
+        xero_sales_total=xero_sales_total,
     )
 
     # Flag transactions above materiality threshold

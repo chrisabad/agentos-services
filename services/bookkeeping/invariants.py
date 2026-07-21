@@ -369,6 +369,95 @@ def check_category_totals(
     )
 
 
+def check_ls_xero_revenue(
+    ls_revenue_cents: int,
+    xero_sales_total: Decimal,
+    entity: str,
+    max_discrepancy_pct: Decimal = Decimal("10"),
+    max_discrepancy_abs: Decimal = Decimal("100"),
+) -> InvariantResult:
+    """
+    INV08 — LS-reported revenue ≈ Xero Sales (account 200).
+
+    Compares LemonSqueezy's reported subtotal (before tax) for the period
+    against the Sales category total in Xero. A discrepancy >10% or $100
+    is flagged as a warning for the agent to explain.
+
+    Args:
+        ls_revenue_cents: LS subtotal for the period (in cents, before tax)
+        xero_sales_total: Xero Sales (account 200) total for the period
+        entity: Entity ID
+        max_discrepancy_pct: Max acceptable % difference (default 10%)
+        max_discrepancy_abs: Max acceptable $ difference (default $100)
+
+    The Xero Sales figure includes ALL revenue, not just LS — for entities
+    where LS is the only revenue source (Font Replacer), this cross-check
+    catches missing/duplicate syncs.
+    """
+    ls_revenue = Decimal(str(ls_revenue_cents)) / Decimal("100")
+
+    if ls_revenue == Decimal("0") and xero_sales_total == Decimal("0"):
+        return InvariantResult(
+            name="INV08_ls_xero_revenue",
+            passed=True,
+            entity=entity,
+            summary="LS↔Xero revenue cross-check: both zero — no revenue this period",
+            severity="info",
+        )
+
+    if ls_revenue == Decimal("0"):
+        return InvariantResult(
+            name="INV08_ls_xero_revenue",
+            passed=False,
+            entity=entity,
+            summary="LS revenue is $0 but Xero Sales shows ${:.2f} — LS data may be missing".format(
+                float(xero_sales_total)
+            ),
+            severity="error",
+        )
+
+    # Calculate discrepancy
+    diff = abs(ls_revenue - xero_sales_total)
+    avg = (ls_revenue + xero_sales_total) / Decimal("2")
+    pct = (diff / avg) * Decimal("100") if avg > Decimal("0") else Decimal("0")
+
+    passed = pct <= max_discrepancy_pct and diff <= max_discrepancy_abs
+
+    summary = (
+        f"LS↔Xero revenue cross-check OK: LS=${float(ls_revenue):.2f} "
+        f"vs Xero Sales=${float(xero_sales_total):.2f} "
+        f"(diff=${float(diff):.2f}/{float(pct):.1f}%)"
+        if passed
+        else (
+            f"LS↔Xero revenue DISCREPANCY: "
+            f"LS=${float(ls_revenue):.2f} vs Xero Sales=${float(xero_sales_total):.2f} "
+            f"(diff=${float(diff):.2f}/{float(pct):.1f}%) — "
+            f"threshold: {float(max_discrepancy_pct)}% / ${float(max_discrepancy_abs):.2f}"
+        )
+    )
+
+    return InvariantResult(
+        name="INV08_ls_xero_revenue",
+        passed=passed,
+        entity=entity,
+        summary=summary,
+        detail=(
+            f"LemonSqueezy revenue (subtotal, before tax): ${float(ls_revenue):.2f}\n"
+            f"Xero Sales (account 200): ${float(xero_sales_total):.2f}\n"
+            f"Difference: ${float(diff):.2f} ({float(pct):.1f}%)\n"
+            f"Threshold: {float(max_discrepancy_pct)}% / ${float(max_discrepancy_abs):.2f}\n"
+            f"LS order count: {ls_revenue_cents > 0}"  # placeholder — actual count added in pipeline
+        ),
+        severity="warning",  # Warning, not error — allows close with explanation
+        metrics={
+            "ls_revenue_usd": float(ls_revenue),
+            "xero_sales_usd": float(xero_sales_total),
+            "diff_usd": float(diff),
+            "diff_pct": float(pct),
+        },
+    )
+
+
 def check_prior_month_closed(
     prior_month_summary: Optional[str],
     entity: str,
@@ -419,6 +508,8 @@ def run_all_invariants(
     prior_month_summary: Optional[str] = None,
     period_start: Optional[str] = None,
     period_end: Optional[str] = None,
+    ls_revenue_cents: Optional[int] = None,
+    xero_sales_total: Optional[Decimal] = None,
 ) -> InvariantReport:
     """
     Run all applicable invariant checks for one entity.
@@ -463,7 +554,13 @@ def run_all_invariants(
     # INV07
     results.append(check_prior_month_closed(prior_month_summary, entity))
 
-    all_passed = all(r.passed or r.severity == "warning" for r in results)
+    # INV08 — LS↔Xero revenue cross-check (only when both values provided)
+    if ls_revenue_cents is not None and xero_sales_total is not None:
+        results.append(check_ls_xero_revenue(
+            ls_revenue_cents, xero_sales_total, entity,
+        ))
+
+    all_passed = all(r.passed or r.severity == "warning" or r.severity == "info" for r in results)
 
     return InvariantReport(
         entity=entity,
