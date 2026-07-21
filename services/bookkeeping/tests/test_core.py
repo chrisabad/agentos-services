@@ -30,6 +30,7 @@ from services.bookkeeping.invariants import (
 )
 from services.bookkeeping.xero_adapter import (
     BankTransaction,
+    XeroAdapter,
 )
 from services.bookkeeping.monarch_adapter import (
     MonarchTransaction,
@@ -745,3 +746,255 @@ class TestRunLog:
             import shutil
             shutil.rmtree(pl.RUN_LOG_DIR, ignore_errors=True)
             pl.RUN_LOG_DIR = orig_dir
+
+
+# =========================================================================
+# Xero report parser tests
+# =========================================================================
+
+
+class TestXeroParser:
+    """Tests for Xero P&L and Balance Sheet parsers.
+
+    These test the _parse_p_and_l and _parse_balance_sheet static methods
+    on XeroAdapter against both standard (FON) and non-standard (KAL) layouts.
+    """
+
+    # ------------------------------------------------------------------
+    # P&L parser
+    # ------------------------------------------------------------------
+
+    def test_parse_pnl_kal_nonstandard(self):
+        """KAL's P&L has empty section titles and combined sections."""
+        from services.bookkeeping.tests.fixtures import kal_p_and_l
+        revenue, expenses = XeroAdapter._parse_p_and_l(kal_p_and_l())
+        assert revenue == Decimal("5000"), f"Expected revenue=5000, got {revenue}"
+        assert expenses == Decimal("2876.54"), f"Expected expenses=2876.54, got {expenses}"
+
+    def test_parse_pnl_fon_standard(self):
+        """FON's P&L has standard Revenue/Expenses section titles."""
+        from services.bookkeeping.tests.fixtures import fon_p_and_l
+        revenue, expenses = XeroAdapter._parse_p_and_l(fon_p_and_l())
+        assert revenue == Decimal("12000"), f"Expected revenue=12000, got {revenue}"
+        assert expenses == Decimal("4500"), f"Expected expenses=4500, got {expenses}"
+
+    def test_parse_pnl_empty_report(self):
+        """Empty report returns zeroes."""
+        revenue, expenses = XeroAdapter._parse_p_and_l({"Rows": []})
+        assert revenue == 0
+        assert expenses == 0
+
+    def test_parse_pnl_no_rows_key(self):
+        """Report with no Rows key returns zeroes."""
+        revenue, expenses = XeroAdapter._parse_p_and_l({})
+        assert revenue == 0
+        assert expenses == 0
+
+    def test_parse_pnl_negative_values_only(self):
+        """All negative values should be classified as expenses."""
+        report = {
+            "Rows": [
+                {
+                    "RowType": "Section",
+                    "Title": "Costs",
+                    "Rows": [
+                        {"RowType": "Row", "Cells": [{"Value": "Rent"}, {"Value": "-2000.00"}]},
+                        {"RowType": "Row", "Cells": [{"Value": "Utilities"}, {"Value": "-500.00"}]},
+                    ],
+                },
+            ],
+        }
+        revenue, expenses = XeroAdapter._parse_p_and_l(report)
+        assert revenue == 0
+        assert expenses == 2500
+
+    def test_parse_pnl_positive_values_only(self):
+        """All positive values should be classified as revenue."""
+        report = {
+            "Rows": [
+                {
+                    "RowType": "Section",
+                    "Title": "Income",
+                    "Rows": [
+                        {"RowType": "Row", "Cells": [{"Value": "Sales"}, {"Value": "8000.00"}]},
+                        {"RowType": "Row", "Cells": [{"Value": "Interest"}, {"Value": "150.00"}]},
+                    ],
+                },
+            ],
+        }
+        revenue, expenses = XeroAdapter._parse_p_and_l(report)
+        assert revenue == 8150
+        assert expenses == 0
+
+    def test_parse_pnl_mixed_signs_in_section(self):
+        """Mixed positive and negative values in same section."""
+        report = {
+            "Rows": [
+                {
+                    "RowType": "Section",
+                    "Title": "Other Income and Expense",
+                    "Rows": [
+                        {"RowType": "Row", "Cells": [{"Value": "Interest"}, {"Value": "100.00"}]},
+                        {"RowType": "Row", "Cells": [{"Value": "Bank Fees"}, {"Value": "-25.00"}]},
+                    ],
+                },
+            ],
+        }
+        revenue, expenses = XeroAdapter._parse_p_and_l(report)
+        assert revenue == 100
+        assert expenses == 25
+
+    def test_parse_pnl_nested_subsections(self):
+        """P&L with nested sub-sections (e.g. Cost of Goods Sold breakdown)."""
+        report = {
+            "Rows": [
+                {
+                    "RowType": "Section",
+                    "Title": "Revenue",
+                    "Rows": [
+                        {"RowType": "Row", "Cells": [{"Value": "Sales"}, {"Value": "10000.00"}]},
+                    ],
+                },
+                {
+                    "RowType": "Section",
+                    "Title": "Cost of Goods Sold",
+                    "Rows": [
+                        {
+                            "RowType": "Section",
+                            "Title": "Materials",
+                            "Rows": [
+                                {"RowType": "Row", "Cells": [{"Value": "Raw Materials"}, {"Value": "-3000.00"}]},
+                            ],
+                        },
+                        {
+                            "RowType": "Section",
+                            "Title": "Labor",
+                            "Rows": [
+                                {"RowType": "Row", "Cells": [{"Value": "Direct Labor"}, {"Value": "-1500.00"}]},
+                            ],
+                        },
+                    ],
+                },
+            ],
+        }
+        revenue, expenses = XeroAdapter._parse_p_and_l(report)
+        assert revenue == 10000
+        assert expenses == 4500
+
+    # ------------------------------------------------------------------
+    # Balance Sheet parser
+    # ------------------------------------------------------------------
+
+    def test_parse_bs_kal_nested_assets(self):
+        """KAL's BS has nested sub-sections under Assets."""
+        from services.bookkeeping.tests.fixtures import kal_balance_sheet
+        assets, liabilities, equity = XeroAdapter._parse_balance_sheet(kal_balance_sheet())
+        assert assets == Decimal("2876.54"), f"Expected assets=2876.54, got {assets}"
+        assert liabilities == Decimal("7980.28"), f"Expected liabilities=7980.28, got {liabilities}"
+        assert equity == Decimal("-5103.74"), f"Expected equity=-5103.74, got {equity}"
+
+    def test_parse_bs_fon_flat(self):
+        """FON's BS has flat section structure."""
+        from services.bookkeeping.tests.fixtures import fon_balance_sheet
+        assets, liabilities, equity = XeroAdapter._parse_balance_sheet(fon_balance_sheet())
+        assert assets == Decimal("25000"), f"Expected assets=25000, got {assets}"
+        assert liabilities == Decimal("10000"), f"Expected liabilities=10000, got {liabilities}"
+        assert equity == Decimal("15000"), f"Expected equity=15000, got {equity}"
+
+    def test_parse_bs_empty_report(self):
+        """Empty report returns zeroes."""
+        assets, liabilities, equity = XeroAdapter._parse_balance_sheet({"Rows": []})
+        assert assets == 0
+        assert liabilities == 0
+        assert equity == 0
+
+    def test_parse_bs_no_rows_key(self):
+        """Report with no Rows key returns zeroes."""
+        assets, liabilities, equity = XeroAdapter._parse_balance_sheet({})
+        assert assets == 0
+        assert liabilities == 0
+        assert equity == 0
+
+    def test_parse_bs_negative_equity(self):
+        """Negative equity (retained losses) should be preserved as negative."""
+        report = {
+            "Rows": [
+                {
+                    "RowType": "Section",
+                    "Title": "Assets",
+                    "Rows": [
+                        {"RowType": "Row", "Cells": [{"Value": "Cash"}, {"Value": "10000.00"}]},
+                    ],
+                },
+                {
+                    "RowType": "Section",
+                    "Title": "Liabilities",
+                    "Rows": [
+                        {"RowType": "Row", "Cells": [{"Value": "AP"}, {"Value": "12000.00"}]},
+                    ],
+                },
+                {
+                    "RowType": "Section",
+                    "Title": "Equity",
+                    "Rows": [
+                        {"RowType": "Row", "Cells": [{"Value": "Retained Earnings"}, {"Value": "-2000.00"}]},
+                    ],
+                },
+            ],
+        }
+        assets, liabilities, equity = XeroAdapter._parse_balance_sheet(report)
+        assert assets == 10000
+        assert liabilities == 12000
+        assert equity == -2000
+
+    def test_parse_bs_deeply_nested(self):
+        """Balance sheet with multiple levels of nesting."""
+        report = {
+            "Rows": [
+                {
+                    "RowType": "Section",
+                    "Title": "Assets",
+                    "Rows": [
+                        {
+                            "RowType": "Section",
+                            "Title": "Current Assets",
+                            "Rows": [
+                                {
+                                    "RowType": "Section",
+                                    "Title": "Bank Accounts",
+                                    "Rows": [
+                                        {"RowType": "Row", "Cells": [{"Value": "Checking"}, {"Value": "5000.00"}]},
+                                        {"RowType": "Row", "Cells": [{"Value": "Savings"}, {"Value": "3000.00"}]},
+                                    ],
+                                },
+                                {
+                                    "RowType": "Section",
+                                    "Title": "Receivables",
+                                    "Rows": [
+                                        {"RowType": "Row", "Cells": [{"Value": "AR"}, {"Value": "2000.00"}]},
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "RowType": "Section",
+                    "Title": "Liabilities",
+                    "Rows": [
+                        {"RowType": "Row", "Cells": [{"Value": "AP"}, {"Value": "5000.00"}]},
+                    ],
+                },
+                {
+                    "RowType": "Section",
+                    "Title": "Equity",
+                    "Rows": [
+                        {"RowType": "Row", "Cells": [{"Value": "Owner's Equity"}, {"Value": "5000.00"}]},
+                    ],
+                },
+            ],
+        }
+        assets, liabilities, equity = XeroAdapter._parse_balance_sheet(report)
+        assert assets == 10000
+        assert liabilities == 5000
+        assert equity == 5000
