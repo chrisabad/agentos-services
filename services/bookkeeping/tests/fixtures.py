@@ -7,7 +7,7 @@ These simulate the actual Xero API response structure for both standard
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 
 # =========================================================================
