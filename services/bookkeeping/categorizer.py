@@ -96,7 +96,7 @@ class RuleBasedCategorizer:
                     if "||" in line:
                         pattern, cat_id = line.split("||", 1)
                         self._rules.append((pattern.strip(), cat_id.strip()))
-        except (OSError, IOError) as e:
+        except (OSError, IOError):
             # Rules file unreadable — fall through with empty rules
             pass
 

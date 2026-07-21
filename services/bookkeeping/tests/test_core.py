@@ -503,7 +503,8 @@ class TestLoadRules:
 
     def test_load_rules_with_file(self):
         """Loads rules from a file, skipping comments."""
-        import tempfile, os
+        import tempfile
+        import os
         with tempfile.NamedTemporaryFile(mode="w", suffix=".rules", delete=False) as f:
             f.write("# Comment line\n")
             f.write("stripe||200\n")
@@ -520,7 +521,8 @@ class TestLoadRules:
 
     def test_load_rules_only_comments(self):
         """File with only comments returns empty list."""
-        import tempfile, os
+        import tempfile
+        import os
         with tempfile.NamedTemporaryFile(mode="w", suffix=".rules", delete=False) as f:
             f.write("# Only comments\n")
             f.write("# Another comment\n")

@@ -418,7 +418,6 @@ class TestModelCategorizer:
 
     def test_available_categories_mapping(self):
         """Model categorizer has access to the entity's chart of accounts."""
-        config = load_config(Entity.KAL)
         assert "200" in KAL_CHART
         assert KAL_CHART["200"] == "Sales"
         assert "461" in KAL_CHART
