@@ -15,7 +15,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from services.bookkeeping import run_bookkeeping_pipeline
+from services.bookkeeping import run_bookkeeping_pipeline, get_run_logs, get_run_log
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +119,21 @@ async def list_invariants():
     ]
 
 
+@app.get("/bookkeeping/runs")
+async def list_runs(period: Optional[str] = None):
+    """List past run logs, optionally filtered by period (YYYY-MM)."""
+    return get_run_logs(period=period)
+
+
+@app.get("/bookkeeping/runs/{period}/{timestamp:path}")
+async def get_run(period: str, timestamp: str):
+    """Retrieve a specific run log by period and timestamp."""
+    log = get_run_log(period, timestamp)
+    if log is None:
+        raise HTTPException(status_code=404, detail="Run log not found")
+    return log
+
+
 @app.post("/bookkeeping/run")
 async def run_pipeline(req: RunRequest):
     """
@@ -142,6 +157,7 @@ async def run_pipeline(req: RunRequest):
             "summary": result.summary_text,
             "flags": result.flags,
             "entities": result.entity_reports,
+            "log_path": result.log_path,
             "raw": result.raw.to_dict(),
         }
     except Exception as e:

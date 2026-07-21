@@ -10,6 +10,7 @@ Flow:
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -35,6 +36,108 @@ from .categorizer import (
     _needs_judge_review,
 )
 from .config import KAL_CHART
+
+# ---------------------------------------------------------------------------
+# Run log directory
+# ---------------------------------------------------------------------------
+
+RUN_LOG_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "runs",
+)
+
+
+def write_run_log(run_report: RunReport) -> str:
+    """Write an immutable JSON run log to runs/YYYY-MM/run-{timestamp}.json.
+
+    Each run produces one file. The file is never modified after creation
+    (append-only / write-once semantics). Returns the absolute path written.
+    """
+    period_dir = os.path.join(RUN_LOG_DIR, run_report.period)
+    os.makedirs(period_dir, exist_ok=True)
+
+    # Sanitise timestamp for filename
+    ts = run_report.timestamp.replace(":", "-").replace(".", "-")
+    filename = f"run-{ts}.json"
+    filepath = os.path.join(period_dir, filename)
+
+    # Write-once: refuse to overwrite an existing log
+    if os.path.exists(filepath):
+        raise FileExistsError(
+            f"Run log already exists (write-once): {filepath}"
+        )
+
+    with open(filepath, "w") as f:
+        json.dump(run_report.to_dict(), f, indent=2, default=str)
+        f.write("\n")
+
+    return filepath
+
+
+def get_run_logs(period: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List all run logs, optionally filtered by period (YYYY-MM).
+
+    Returns metadata (period, timestamp, all_passed, entity_count) for each log.
+    """
+    logs: List[Dict[str, Any]] = []
+
+    if period:
+        period_dirs = [os.path.join(RUN_LOG_DIR, period)]
+    else:
+        try:
+            period_dirs = sorted(
+                os.path.join(RUN_LOG_DIR, d)
+                for d in os.listdir(RUN_LOG_DIR)
+                if os.path.isdir(os.path.join(RUN_LOG_DIR, d))
+            )
+        except FileNotFoundError:
+            return logs
+
+    for pdir in period_dirs:
+        if not os.path.isdir(pdir):
+            continue
+        period_name = os.path.basename(pdir)
+        for fname in sorted(os.listdir(pdir)):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(pdir, fname)
+            try:
+                with open(fpath) as f:
+                    data = json.load(f)
+                logs.append({
+                    "period": period_name,
+                    "timestamp": data.get("timestamp", ""),
+                    "all_passed": data.get("all_passed", False),
+                    "entity_count": len(data.get("entities", {})),
+                    "file": fpath,
+                })
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    return logs
+
+
+def get_run_log(period: str, timestamp: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a specific run log by period and timestamp.
+
+    Timestamp is matched as a prefix (the filename uses a sanitised version).
+    Returns the full run report dict, or None if not found.
+    """
+    period_dir = os.path.join(RUN_LOG_DIR, period)
+    if not os.path.isdir(period_dir):
+        return None
+
+    ts_sanitised = timestamp.replace(":", "-").replace(".", "-")
+    for fname in os.listdir(period_dir):
+        if ts_sanitised in fname and fname.endswith(".json"):
+            fpath = os.path.join(period_dir, fname)
+            try:
+                with open(fpath) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                return None
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Types
@@ -97,6 +200,7 @@ class PipelineResult:
     flags: List[str]
     entity_reports: Dict[str, Dict[str, Any]]
     raw: RunReport
+    log_path: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +272,9 @@ def run_bookkeeping_pipeline(
         e.invariant_report.all_passed for e in run_report.entities.values()
     )
 
+    # Persist immutable run log
+    log_path = write_run_log(run_report)
+
     summary_text = _build_summary(run_report)
 
     return PipelineResult(
@@ -185,6 +292,7 @@ def run_bookkeeping_pipeline(
             for k, e in run_report.entities.items()
         },
         raw=run_report,
+        log_path=log_path,
     )
 
 
