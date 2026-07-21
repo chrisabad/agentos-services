@@ -560,3 +560,188 @@ class TestEntityRun:
         assert run.categorization_results[0]["suggested_category_id"] == "200"
         assert len(run.judge_disagreements) == 1
         assert run.judge_disagreements[0]["judge_category_id"] == "461"
+
+
+# =========================================================================
+# Run log tests
+# =========================================================================
+
+
+class TestRunLog:
+    def test_write_run_log_creates_file(self):
+        """write_run_log creates a JSON file in runs/YYYY-MM/."""
+        from services.bookkeeping.pipeline import (
+            write_run_log, RunReport, EntityRun, InvariantReport,
+        )
+        import tempfile
+        import os
+
+        report = RunReport(
+            period="2026-06",
+            timestamp="2026-07-21T12:00:00",
+            entities={
+                "KAL": EntityRun(
+                    entity="KAL",
+                    entity_name="Kaleidoscope",
+                    period="2026-06",
+                    data=[],
+                    invariant_report=InvariantReport(
+                        entity="KAL", all_passed=True, results=[],
+                    ),
+                    summary="Kaleidoscope: PASS",
+                ),
+            },
+            all_passed=True,
+        )
+
+        # Temporarily override RUN_LOG_DIR
+        import services.bookkeeping.pipeline as pl
+        orig_dir = pl.RUN_LOG_DIR
+        pl.RUN_LOG_DIR = tempfile.mkdtemp()
+        try:
+            path = write_run_log(report)
+            assert os.path.isfile(path)
+            assert "2026-06" in path
+            assert path.endswith(".json")
+
+            import json
+            with open(path) as f:
+                data = json.load(f)
+            assert data["period"] == "2026-06"
+            assert data["all_passed"] is True
+            assert "KAL" in data["entities"]
+        finally:
+            import shutil
+            shutil.rmtree(pl.RUN_LOG_DIR, ignore_errors=True)
+            pl.RUN_LOG_DIR = orig_dir
+
+    def test_write_run_log_write_once(self):
+        """write_run_log raises FileExistsError on duplicate write."""
+        from services.bookkeeping.pipeline import (
+            write_run_log, RunReport, EntityRun, InvariantReport,
+        )
+        import tempfile
+        import os
+
+        report = RunReport(
+            period="2026-06",
+            timestamp="2026-07-21T12-00-00",
+            entities={},
+            all_passed=True,
+        )
+
+        import services.bookkeeping.pipeline as pl
+        orig_dir = pl.RUN_LOG_DIR
+        pl.RUN_LOG_DIR = tempfile.mkdtemp()
+        try:
+            path = write_run_log(report)
+            assert os.path.isfile(path)
+            # Second write with same timestamp should fail
+            import pytest
+            with pytest.raises(FileExistsError):
+                write_run_log(report)
+        finally:
+            import shutil
+            shutil.rmtree(pl.RUN_LOG_DIR, ignore_errors=True)
+            pl.RUN_LOG_DIR = orig_dir
+
+    def test_get_run_logs_empty(self):
+        """get_run_logs returns empty list when no runs exist."""
+        from services.bookkeeping.pipeline import get_run_logs
+        import tempfile
+        import services.bookkeeping.pipeline as pl
+
+        orig_dir = pl.RUN_LOG_DIR
+        pl.RUN_LOG_DIR = tempfile.mkdtemp()
+        try:
+            logs = get_run_logs()
+            assert logs == []
+            logs = get_run_logs(period="2026-06")
+            assert logs == []
+        finally:
+            import shutil
+            shutil.rmtree(pl.RUN_LOG_DIR, ignore_errors=True)
+            pl.RUN_LOG_DIR = orig_dir
+
+    def test_get_run_logs_with_data(self):
+        """get_run_logs returns metadata for written logs."""
+        from services.bookkeeping.pipeline import (
+            write_run_log, get_run_logs, RunReport, EntityRun, InvariantReport,
+        )
+        import tempfile
+        import services.bookkeeping.pipeline as pl
+
+        report = RunReport(
+            period="2026-06",
+            timestamp="2026-07-21T12-00-00",
+            entities={
+                "KAL": EntityRun(
+                    entity="KAL",
+                    entity_name="Kaleidoscope",
+                    period="2026-06",
+                    data=[],
+                    invariant_report=InvariantReport(
+                        entity="KAL", all_passed=True, results=[],
+                    ),
+                    summary="KAL: PASS",
+                ),
+            },
+            all_passed=True,
+        )
+
+        orig_dir = pl.RUN_LOG_DIR
+        pl.RUN_LOG_DIR = tempfile.mkdtemp()
+        try:
+            write_run_log(report)
+            logs = get_run_logs()
+            assert len(logs) == 1
+            assert logs[0]["period"] == "2026-06"
+            assert logs[0]["all_passed"] is True
+            assert logs[0]["entity_count"] == 1
+
+            # Filter by period
+            logs = get_run_logs(period="2026-06")
+            assert len(logs) == 1
+
+            logs = get_run_logs(period="2026-07")
+            assert len(logs) == 0
+        finally:
+            import shutil
+            shutil.rmtree(pl.RUN_LOG_DIR, ignore_errors=True)
+            pl.RUN_LOG_DIR = orig_dir
+
+    def test_get_run_log_found(self):
+        """get_run_log retrieves a specific run by period and timestamp."""
+        from services.bookkeeping.pipeline import (
+            write_run_log, get_run_log, RunReport, EntityRun, InvariantReport,
+        )
+        import tempfile
+        import services.bookkeeping.pipeline as pl
+
+        report = RunReport(
+            period="2026-06",
+            timestamp="2026-07-21T12-00-00",
+            entities={},
+            all_passed=True,
+        )
+
+        orig_dir = pl.RUN_LOG_DIR
+        pl.RUN_LOG_DIR = tempfile.mkdtemp()
+        try:
+            write_run_log(report)
+            log = get_run_log("2026-06", "2026-07-21T12-00-00")
+            assert log is not None
+            assert log["period"] == "2026-06"
+            assert log["all_passed"] is True
+
+            # Not found
+            log = get_run_log("2026-06", "2099-01-01T00-00-00")
+            assert log is None
+
+            # Wrong period
+            log = get_run_log("2026-07", "2026-07-21T12-00-00")
+            assert log is None
+        finally:
+            import shutil
+            shutil.rmtree(pl.RUN_LOG_DIR, ignore_errors=True)
+            pl.RUN_LOG_DIR = orig_dir

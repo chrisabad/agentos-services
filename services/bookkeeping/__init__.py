@@ -21,6 +21,9 @@ from .pipeline import (
     PipelineResult,
     RunReport,
     run_bookkeeping_pipeline,
+    write_run_log,
+    get_run_logs,
+    get_run_log,
 )
 from .categorizer import (
     CategorizationInput,
@@ -41,6 +44,7 @@ __all__ = [
     "check_no_out_of_period", "check_category_totals",
     "run_all_invariants",
     "PipelineResult", "RunReport", "run_bookkeeping_pipeline",
+    "write_run_log", "get_run_logs", "get_run_log",
     "CategorizationInput", "CategorizationPipeline",
     "CategorizationReport", "CategorizationResult",
     "RuleBasedCategorizer", "ModelCategorizer",
