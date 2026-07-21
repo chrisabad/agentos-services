@@ -72,6 +72,7 @@ class XeroData:
     balance_sheet: Optional[BalanceSheet] = None
     unreconciled_count: int = 0
     total_txns: int = 0
+    bank_statement_totals: Optional[Dict[str, Decimal]] = None
 
 # ---------------------------------------------------------------------------
 # Adapter
