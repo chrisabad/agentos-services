@@ -11,10 +11,8 @@ import os
 import tempfile
 from decimal import Decimal
 
-import pytest
 
 from services.bookkeeping.config import (
-    EntityConfig,
     Entity,
     load_config,
     KAL_CHART,
@@ -23,7 +21,6 @@ from services.bookkeeping.categorizer import (
     CategorizationInput,
     CategorizationPipeline,
     CategorizationResult,
-    CategorizationReport,
     ModelCategorizer,
     RuleBasedCategorizer,
     _needs_judge_review,
@@ -419,7 +416,6 @@ class TestModelCategorizer:
 
     def test_available_categories_mapping(self):
         """Model categorizer has access to the entity's chart of accounts."""
-        config = load_config(Entity.KAL)
         assert "200" in KAL_CHART
         assert KAL_CHART["200"] == "Sales"
         assert "461" in KAL_CHART
