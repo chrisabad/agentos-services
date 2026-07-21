@@ -26,6 +26,8 @@ from services.bookkeeping.categorizer import (
     CategorizationReport,
     ModelCategorizer,
     RuleBasedCategorizer,
+    JudgeCategorizer,
+    JudgeVerdict,
     _needs_judge_review,
 )
 
@@ -425,3 +427,99 @@ class TestModelCategorizer:
         assert "461" in KAL_CHART
         assert KAL_CHART["461"] == "Software"
         assert "999" not in KAL_CHART  # Unknown category
+
+
+# =========================================================================
+# JudgeCategorizer tests (no live API calls)
+# =========================================================================
+
+
+class TestJudgeCategorizer:
+    def test_no_api_key_returns_agrees(self):
+        """Without OLLAMA_API_KEY, judge returns agrees=True."""
+        config = load_config(Entity.KAL)
+        judge = JudgeCategorizer(config)
+        verdict = judge.verify(
+            transaction_id="txn-001",
+            merchant="Stripe",
+            description="Monthly payment",
+            amount=Decimal("500.00"),
+            model_category_id="200",
+            model_confidence=0.95,
+            available_categories=KAL_CHART,
+        )
+        assert verdict.agrees is True
+        assert verdict.transaction_id == "txn-001"
+        assert verdict.original_category_id == "200"
+        assert "no api key" in verdict.rationale.lower()
+
+    def test_no_api_key_no_category_returns_agrees(self):
+        """When model_category_id is None, judge returns agrees."""
+        config = load_config(Entity.KAL)
+        judge = JudgeCategorizer(config)
+        verdict = judge.verify(
+            transaction_id="txn-002",
+            merchant="Unknown",
+            description="Random expense",
+            amount=Decimal("25.00"),
+            model_category_id=None,
+            model_confidence=0.0,
+            available_categories=KAL_CHART,
+        )
+        assert verdict.agrees is True
+        assert "uncategorized" in verdict.rationale.lower()
+
+    def test_needs_judge_review_small_low_confidence(self):
+        """Small amount + low confidence still triggers judge (below 0.5)."""
+        assert _needs_judge_review(
+            amount=Decimal("10.00"),
+            confidence=0.40,
+            materiality_threshold=500.0,
+        ) is True
+
+    def test_needs_judge_review_large_high_confidence(self):
+        """Large amount but high confidence (rule-level) → no judge."""
+        assert _needs_judge_review(
+            amount=Decimal("5000.00"),
+            confidence=0.95,
+            materiality_threshold=500.0,
+        ) is False
+
+    def test_needs_judge_review_large_medium_confidence(self):
+        """Large amount + medium confidence → needs judge."""
+        assert _needs_judge_review(
+            amount=Decimal("1000.00"),
+            confidence=0.75,
+            materiality_threshold=500.0,
+        ) is True
+
+    def test_needs_judge_review_at_threshold(self):
+        """Amount exactly at materiality threshold with sub-0.9 confidence → needs judge."""
+        assert _needs_judge_review(
+            amount=Decimal("500.00"),
+            confidence=0.80,
+            materiality_threshold=500.0,
+        ) is True
+
+    def test_needs_judge_review_below_threshold_low_confidence(self):
+        """Below materiality threshold but very low confidence → still needs judge."""
+        assert _needs_judge_review(
+            amount=Decimal("50.00"),
+            confidence=0.30,
+            materiality_threshold=500.0,
+        ) is True
+
+    def test_judge_verdict_dataclass(self):
+        """JudgeVerdict dataclass fields work correctly."""
+        verdict = JudgeVerdict(
+            transaction_id="txn-001",
+            original_category_id="200",
+            original_confidence=0.95,
+            judge_category_id="461",
+            judge_confidence=0.85,
+            agrees=False,
+            rationale="This appears to be a software subscription, not revenue.",
+        )
+        assert not verdict.agrees
+        assert verdict.original_category_id == "200"
+        assert verdict.judge_category_id == "461"

@@ -1,0 +1,23 @@
+# Font Replacer categorization rules
+# Format: merchant_pattern||category_id
+# Pattern is case-insensitive substring match, first match wins.
+#
+# Seeded with known recurring merchants. New rules accumulate
+# via the approve_and_learn mechanism as transactions are reviewed.
+#
+# Sales & Revenue (200)
+stripe||200
+shopify||200
+gumroad||200
+
+# Software & Subscriptions (461)
+aws||461
+github||461
+vercel||461
+cloudflare||461
+google workspace||461
+
+# Bank Fees (404)
+wise||404
+
+# General Expenses (429)

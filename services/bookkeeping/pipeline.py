@@ -10,7 +10,7 @@ Flow:
 
 from __future__ import annotations
 
-import json
+import os
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -18,18 +18,25 @@ from typing import Any, Dict, List, Optional
 
 from .config import (
     EntityConfig,
-    Entity,
     load_config,
     period_start_end,
     last_completed_month,
 )
 from .invariants import (
     InvariantReport,
-    InvariantResult,
     run_all_invariants,
 )
 from .xero_adapter import XeroAdapter, XeroData, BankTransaction
-from .monarch_adapter import MonarchAdapter, MonarchData, MonarchTransaction
+from .monarch_adapter import MonarchAdapter, MonarchData
+from .categorizer import (
+    CategorizationPipeline,
+    CategorizationInput,
+    CategorizationResult,
+    JudgeCategorizer,
+    JudgeVerdict,
+    _needs_judge_review,
+)
+from .config import KAL_CHART
 
 # ---------------------------------------------------------------------------
 # Types
@@ -45,6 +52,8 @@ class EntityRun:
     data: Any
     invariant_report: InvariantReport
     flagged_transactions: List[Dict[str, Any]] = field(default_factory=list)
+    categorization_results: List[Dict[str, Any]] = field(default_factory=list)
+    judge_disagreements: List[Dict[str, Any]] = field(default_factory=list)
     summary: str = ""
 
 
@@ -71,6 +80,8 @@ class RunReport:
                         "warnings": [r.to_dict() for r in e.invariant_report.warnings()],
                     },
                     "flagged_count": len(e.flagged_transactions),
+                    "categorization_results": e.categorization_results,
+                    "judge_disagreements": e.judge_disagreements,
                     "summary": e.summary,
                 }
                 for k, e in self.entities.items()
@@ -146,6 +157,14 @@ def run_bookkeeping_pipeline(
             all_flags.extend(flags)
         if entity_run.flagged_transactions:
             flags.append(f"[{entity_id}] {len(entity_run.flagged_transactions)} transactions flagged")
+        if entity_run.judge_disagreements:
+            for d in entity_run.judge_disagreements:
+                flags.append(
+                    f"[{entity_id}] Judge disagrees on {d.get('transaction_id', '?')}: "
+                    f"model={d.get('model_category_id')} vs judge={d.get('judge_category_id')} "
+                    f"({d.get('rationale', '')})"
+                )
+                all_flags.append(flags[-1])
 
     run_report.all_passed = all(
         e.invariant_report.all_passed for e in run_report.entities.values()
@@ -162,6 +181,8 @@ def run_bookkeeping_pipeline(
             k: {
                 "summary": e.summary,
                 "flagged": e.flagged_transactions,
+                "categorization_results": e.categorization_results,
+                "judge_disagreements": e.judge_disagreements,
             }
             for k, e in run_report.entities.items()
         },
@@ -203,7 +224,81 @@ def _run_xero_entity(
     adapter = XeroAdapter(config)
     data = adapter.pull_all(start, end)
 
-    # Compute category totals
+    # ------------------------------------------------------------------
+    # Categorization pipeline + judge-tier spot verification
+    # ------------------------------------------------------------------
+    cat_pipeline = CategorizationPipeline(config)
+    judge = JudgeCategorizer(config)
+    materiality = config.single_txn_flag or 500.0
+    chart = config.chart or KAL_CHART
+
+    # Build CategorizationInputs from BankTransactions
+    cat_inputs = [
+        CategorizationInput(
+            transaction_id=t.id,
+            merchant=t.contact_name or "",
+            description=t.description,
+            amount=t.total,
+            existing_category_id=t.account_code,
+        )
+        for t in data.transactions
+    ]
+
+    # Run categorization
+    cat_report = cat_pipeline.categorize_batch(cat_inputs)
+
+    # Run judge-tier spot verification on model/rule results that meet criteria
+    judge_disagreements: List[Dict[str, Any]] = []
+    for result in cat_report.results:
+        if result.source == "existing":
+            continue  # Already approved — skip judge
+
+        is_novel_merchant = result.merchant and result.merchant not in (
+            r.split("||")[0] for r in _load_rules(config.rules_path) if config.rules_path
+        ) if config.rules_path else True
+
+        if _needs_judge_review(result.amount, result.confidence, materiality) or is_novel_merchant:
+            verdict = judge.verify(
+                transaction_id=result.transaction_id,
+                merchant=result.merchant,
+                description=result.description,
+                amount=result.amount,
+                model_category_id=result.suggested_category_id,
+                model_confidence=result.confidence,
+                available_categories=chart,
+            )
+            if not verdict.agrees:
+                judge_disagreements.append({
+                    "transaction_id": result.transaction_id,
+                    "merchant": result.merchant,
+                    "description": result.description,
+                    "amount": float(result.amount),
+                    "model_category_id": result.suggested_category_id,
+                    "model_category_name": result.suggested_category_name,
+                    "model_confidence": result.confidence,
+                    "judge_category_id": verdict.judge_category_id,
+                    "judge_confidence": verdict.judge_confidence,
+                    "rationale": verdict.rationale,
+                    "source": result.source,
+                })
+
+    # Build categorization results for summary
+    categorization_results = [
+        {
+            "transaction_id": r.transaction_id,
+            "merchant": r.merchant or "",
+            "description": r.description,
+            "amount": float(r.amount),
+            "suggested_category_id": r.suggested_category_id,
+            "suggested_category_name": r.suggested_category_name,
+            "confidence": r.confidence,
+            "source": r.source,
+            "needs_judge": _needs_judge_review(r.amount, r.confidence, materiality),
+        }
+        for r in cat_report.results
+    ]
+
+    # Compute category totals (now includes categorization results)
     category_totals: Dict[str, Decimal] = {}
     for t in data.transactions:
         cat = t.account_code or "__uncategorized__"
@@ -251,6 +346,8 @@ def _run_xero_entity(
         data=data,
         invariant_report=report,
         flagged_transactions=flagged,
+        categorization_results=categorization_results,
+        judge_disagreements=judge_disagreements,
         summary=summary,
     )
 
@@ -265,6 +362,80 @@ def _run_monarch_entity(
     """Run pipeline for a Monarch entity."""
     adapter = MonarchAdapter(config)
     data = adapter.pull_all_sync(start, end)
+
+    # ------------------------------------------------------------------
+    # Categorization pipeline + judge-tier spot verification
+    # ------------------------------------------------------------------
+    cat_pipeline = CategorizationPipeline(config)
+    judge = JudgeCategorizer(config)
+    materiality = config.single_txn_flag or 500.0
+    chart = config.chart or KAL_CHART
+
+    # Build CategorizationInputs from MonarchTransactions
+    cat_inputs = [
+        CategorizationInput(
+            transaction_id=t.id,
+            merchant=t.merchant or "",
+            description=t.description,
+            amount=t.amount,
+            existing_category_id=t.category_id,
+        )
+        for t in data.transactions
+    ]
+
+    # Run categorization
+    cat_report = cat_pipeline.categorize_batch(cat_inputs)
+
+    # Judge-tier spot verification
+    judge_disagreements: List[Dict[str, Any]] = []
+    for result in cat_report.results:
+        if result.source == "existing":
+            continue
+
+        is_novel_merchant = result.merchant and result.merchant not in (
+            r.split("||")[0] for r in _load_rules(config.rules_path) if config.rules_path
+        ) if config.rules_path else True
+
+        if _needs_judge_review(result.amount, result.confidence, materiality) or is_novel_merchant:
+            verdict = judge.verify(
+                transaction_id=result.transaction_id,
+                merchant=result.merchant,
+                description=result.description,
+                amount=result.amount,
+                model_category_id=result.suggested_category_id,
+                model_confidence=result.confidence,
+                available_categories=chart,
+            )
+            if not verdict.agrees:
+                judge_disagreements.append({
+                    "transaction_id": result.transaction_id,
+                    "merchant": result.merchant,
+                    "description": result.description,
+                    "amount": float(result.amount),
+                    "model_category_id": result.suggested_category_id,
+                    "model_category_name": result.suggested_category_name,
+                    "model_confidence": result.confidence,
+                    "judge_category_id": verdict.judge_category_id,
+                    "judge_confidence": verdict.judge_confidence,
+                    "rationale": verdict.rationale,
+                    "source": result.source,
+                })
+
+    # Build categorization results for summary
+    categorization_results = [
+        {
+            "transaction_id": r.transaction_id,
+            "merchant": r.merchant or "",
+            "description": r.description,
+            "amount": float(r.amount),
+            "suggested_category_id": r.suggested_category_id,
+            "suggested_category_name": r.suggested_category_name,
+            "confidence": r.confidence,
+            "source": r.source,
+            "needs_judge": _needs_judge_review(r.amount, r.confidence, materiality),
+        }
+        for r in cat_report.results
+    ]
 
     # Compute category totals
     category_totals: Dict[str, Decimal] = {}
@@ -316,6 +487,8 @@ def _run_monarch_entity(
         data=data,
         invariant_report=report,
         flagged_transactions=flagged,
+        categorization_results=categorization_results,
+        judge_disagreements=judge_disagreements,
         summary=summary,
     )
 
@@ -323,6 +496,14 @@ def _run_monarch_entity(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _load_rules(rules_path: Optional[str]) -> List[str]:
+    """Load raw rules lines from the rules file. Returns empty list if none."""
+    if not rules_path or not os.path.isfile(rules_path):
+        return []
+    with open(rules_path, "r") as f:
+        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
 
 def _flag_transactions(

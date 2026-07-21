@@ -48,6 +48,8 @@ from services.bookkeeping.pipeline import (
     run_bookkeeping_pipeline,
     _flag_transactions,
     _build_summary,
+    _load_rules,
+    EntityRun,
 )
 
 
@@ -65,6 +67,8 @@ class TestConfig:
         assert cfg.net_loss_flag == -1000.0
         assert cfg.chart["200"] == "Sales"
         assert cfg.chart["461"] == "Software"
+        assert cfg.rules_path is not None
+        assert "kal.rules" in cfg.rules_path
 
     def test_load_fon_config(self):
         cfg = load_config(Entity.FON)
@@ -72,6 +76,8 @@ class TestConfig:
         assert cfg.source_type == "xero"
         assert cfg.xero_org_prefix == "font_replacer"
         assert cfg.net_loss_flag == -200.0
+        assert cfg.rules_path is not None
+        assert "fon.rules" in cfg.rules_path
 
     def test_load_per_config(self):
         cfg = load_config(Entity.PER)
@@ -495,3 +501,71 @@ class TestBuildSummary:
         assert "2026-06" in summary
         assert "1/1" in summary
         assert "Kaleidoscope" in summary
+
+
+class TestLoadRules:
+    def test_load_rules_none_path(self):
+        """None path returns empty list."""
+        assert _load_rules(None) == []
+
+    def test_load_rules_nonexistent(self):
+        """Nonexistent path returns empty list."""
+        assert _load_rules("/tmp/nonexistent.rules") == []
+
+    def test_load_rules_with_file(self):
+        """Loads rules from a file, skipping comments."""
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".rules", delete=False) as f:
+            f.write("# Comment line\n")
+            f.write("stripe||200\n")
+            f.write("aws||461\n")
+            f.write("\n")  # blank line
+            path = f.name
+        try:
+            rules = _load_rules(path)
+            assert len(rules) == 2
+            assert "stripe||200" in rules
+            assert "aws||461" in rules
+        finally:
+            os.unlink(path)
+
+    def test_load_rules_only_comments(self):
+        """File with only comments returns empty list."""
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".rules", delete=False) as f:
+            f.write("# Only comments\n")
+            f.write("# Another comment\n")
+            path = f.name
+        try:
+            rules = _load_rules(path)
+            assert rules == []
+        finally:
+            os.unlink(path)
+
+
+class TestEntityRun:
+    def test_entity_run_new_fields(self):
+        """EntityRun supports categorization_results and judge_disagreements."""
+        from services.bookkeeping.pipeline import InvariantReport
+        run = EntityRun(
+            entity="KAL",
+            entity_name="Kaleidoscope",
+            period="2026-06",
+            data=[],
+            invariant_report=InvariantReport(
+                entity="KAL", all_passed=True, results=[],
+            ),
+            categorization_results=[
+                {"transaction_id": "txn-001", "merchant": "Stripe",
+                 "suggested_category_id": "200", "confidence": 0.95, "source": "rule"},
+            ],
+            judge_disagreements=[
+                {"transaction_id": "txn-002",
+                 "model_category_id": "200", "judge_category_id": "461",
+                 "rationale": "Software subscription"},
+            ],
+        )
+        assert len(run.categorization_results) == 1
+        assert run.categorization_results[0]["suggested_category_id"] == "200"
+        assert len(run.judge_disagreements) == 1
+        assert run.judge_disagreements[0]["judge_category_id"] == "461"
