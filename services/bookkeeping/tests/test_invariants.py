@@ -18,6 +18,7 @@ from services.bookkeeping.invariants import (
     check_category_totals,
     check_prior_month_closed,
     check_ls_xero_revenue,
+    check_degenerate_result,
     run_all_invariants,
     InvariantReport,
 )
@@ -440,3 +441,63 @@ class TestRunAll:
         assert d["name"] == "INV01_balance_sheet_balances"
         assert d["passed"] is True
         assert d["entity"] == "KAL"
+
+
+# =====================================================================
+# INV09 — Degenerate all-zero result gate
+# =====================================================================
+
+
+class TestDegenerateResult:
+    def test_non_zero_data_passes(self):
+        """Normal non-zero P&L and BS data → pass."""
+        result = check_degenerate_result(
+            total_assets=Decimal("10000"),
+            total_liabilities=Decimal("4000"),
+            total_equity=Decimal("6000"),
+            current_net=Decimal("500"),
+            entity="KAL",
+        )
+        assert result.passed is True
+        assert result.severity == "error"
+        assert "non-zero" in result.summary.lower()
+
+    def test_all_zero_fails(self):
+        """All zeros across P&L and BS → fail (degenerate)."""
+        result = check_degenerate_result(
+            total_assets=Decimal("0"),
+            total_liabilities=Decimal("0"),
+            total_equity=Decimal("0"),
+            current_net=Decimal("0"),
+            entity="KAL",
+        )
+        assert result.passed is False
+        assert result.severity == "error"
+        assert "degenerate" in result.summary.lower()
+
+    def test_partial_zero_passes(self):
+        """Only some values zero (e.g. no liabilities) → pass (not degenerate)."""
+        result = check_degenerate_result(
+            total_assets=Decimal("10000"),
+            total_liabilities=Decimal("0"),
+            total_equity=Decimal("10000"),
+            current_net=Decimal("500"),
+            entity="KAL",
+        )
+        assert result.passed is True
+
+    def test_inv09_in_run_all_invariants(self):
+        """INV09 is included in run_all_invariants and blocks on all-zero data."""
+        report = run_all_invariants(
+            entity="KAL",
+            total_assets=Decimal("0"),
+            total_liabilities=Decimal("0"),
+            total_equity=Decimal("0"),
+            unreconciled_count=0,
+            unreconciled_threshold=5,
+            current_net=Decimal("0"),
+        )
+        assert report.all_passed is False
+        inv09 = [r for r in report.results if r.name == "INV09_degenerate_result"]
+        assert len(inv09) == 1
+        assert inv09[0].passed is False

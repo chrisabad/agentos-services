@@ -485,6 +485,62 @@ def check_prior_month_closed(
     )
 
 
+def check_degenerate_result(
+    total_assets: Decimal,
+    total_liabilities: Decimal,
+    total_equity: Decimal,
+    current_net: Decimal,
+    entity: str,
+) -> InvariantResult:
+    """
+    INV09 — P&L and Balance Sheet must not be all-zero (degenerate result).
+
+    A bookkeeping pass that produces 0 revenue, 0 expenses, 0 assets,
+    0 liabilities, and 0 equity is degenerate — it means the data source
+    (Xero/Monarch parser) returned nothing useful. The close MUST be
+    blocked, not completed.
+
+    This catches the exact failure mode from KAL-5 (2026-07-21): the
+    Xero P&L/BalanceSheet parser returned all zeros on KAL's chart
+    structure, and the agent marked the issue done anyway.
+    """
+    all_zero = (
+        total_assets == Decimal("0")
+        and total_liabilities == Decimal("0")
+        and total_equity == Decimal("0")
+        and current_net == Decimal("0")
+    )
+
+    passed = not all_zero
+
+    summary = (
+        "P&L and Balance Sheet contain non-zero data"
+        if passed else
+        "DEGENERATE RESULT: P&L and Balance Sheet are ALL ZERO — "
+        "data source or parser returned nothing useful. "
+        "Do NOT mark this issue done. Set blocked with cause."
+    )
+
+    return InvariantResult(
+        name="INV09_degenerate_result",
+        passed=passed,
+        entity=entity,
+        summary=summary,
+        detail=(
+            f"Total Assets: ${total_assets:.2f}\n"
+            f"Total Liabilities: ${total_liabilities:.2f}\n"
+            f"Total Equity: ${total_equity:.2f}\n"
+            f"Net Profit (P&L): ${current_net:.2f}\n"
+            f"All zero: {all_zero}\n"
+            f"\n"
+            f"A degenerate result means the data source or parser returned\n"
+            f"nothing useful. The close MUST be blocked, not completed.\n"
+            f"Suspect: upstream data missing, parser bug, or connection issue."
+        ),
+        severity="error",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -559,6 +615,11 @@ def run_all_invariants(
         results.append(check_ls_xero_revenue(
             ls_revenue_cents, xero_sales_total, entity,
         ))
+
+    # INV09 — Degenerate all-zero result gate
+    results.append(check_degenerate_result(
+        total_assets, total_liabilities, total_equity, current_net, entity,
+    ))
 
     all_passed = all(r.passed or r.severity == "warning" or r.severity == "info" for r in results)
 
