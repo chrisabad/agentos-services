@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Dict, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
@@ -96,7 +98,7 @@ class RuleBasedCategorizer:
                     if "||" in line:
                         pattern, cat_id = line.split("||", 1)
                         self._rules.append((pattern.strip(), cat_id.strip()))
-        except (OSError, IOError):
+        except (OSError, IOError) as e:
             # Rules file unreadable — fall through with empty rules
             pass
 
