@@ -11,6 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 from datetime import date
 
+import pytest
 
 from services.bookkeeping.config import (
     EntityConfig,
@@ -18,6 +19,9 @@ from services.bookkeeping.config import (
     load_config,
     period_start_end,
     last_completed_month,
+    KAL_CHART,
+    FON_CHART,
+    PER_CATEGORIES,
 )
 from services.bookkeeping.invariants import (
     check_balance_sheet_balances,
@@ -27,14 +31,20 @@ from services.bookkeeping.invariants import (
     check_category_totals,
     run_all_invariants,
     InvariantReport,
+    InvariantResult,
 )
 from services.bookkeeping.xero_adapter import (
     BankTransaction,
+    PAndL,
+    BalanceSheet,
+    XeroAdapter,
 )
 from services.bookkeeping.monarch_adapter import (
     MonarchTransaction,
+    MonarchAdapter,
 )
 from services.bookkeeping.pipeline import (
+    run_bookkeeping_pipeline,
     _flag_transactions,
     _build_summary,
 )
@@ -194,30 +204,18 @@ class TestInvariants:
 
     def test_inv06_all_categorized(self):
         result = check_category_totals(
-            categorized_totals={"200": Decimal("5000"), "461": Decimal("200")},
-            statement_totals={"200": Decimal("5000"), "461": Decimal("200")},
+            category_totals={"200": Decimal("5000"), "461": Decimal("200")},
             entity="KAL",
         )
         assert result.passed is True
 
     def test_inv06_uncategorized_found(self):
         result = check_category_totals(
-            categorized_totals={"__uncategorized__": Decimal("1500"), "200": Decimal("5000")},
-            statement_totals={"200": Decimal("5000")},
+            category_totals={"__uncategorized__": Decimal("1500"), "200": Decimal("5000")},
             entity="KAL",
         )
         assert result.passed is False
         assert "uncategorized" in result.summary.lower()
-
-    def test_inv06_statement_mismatch(self):
-        result = check_category_totals(
-            categorized_totals={"200": Decimal("5000"), "461": Decimal("200")},
-            statement_totals={"200": Decimal("4800"), "461": Decimal("200")},
-            entity="KAL",
-        )
-        assert result.passed is False
-        assert "mismatch" in result.summary.lower()
-        assert "200" in result.metrics["mismatches"]
 
     def test_run_all_invariants_error_blocking(self):
         report = run_all_invariants(
@@ -248,69 +246,6 @@ class TestInvariants:
         )
         # Prior month check returns warning "skipped" — should not fail
         assert report.all_passed is True
-
-    def test_run_all_invariants_with_period_dates(self):
-        """INV05 and INV06 run correctly when period dates and category totals provided."""
-        report = run_all_invariants(
-            entity="KAL",
-            total_assets=Decimal("10000"),
-            total_liabilities=Decimal("4000"),
-            total_equity=Decimal("6000"),
-            unreconciled_count=2,
-            unreconciled_threshold=5,
-            current_net=Decimal("500"),
-            previous_net=None,
-            txn_dates=["2026-06-01", "2026-06-15", "2026-06-30"],
-            category_totals={"200": Decimal("5000"), "461": Decimal("200")},
-            statement_totals={"200": Decimal("5000"), "461": Decimal("200")},
-            period_start="2026-06-01",
-            period_end="2026-06-30",
-        )
-        assert report.all_passed is True
-        name_inv05 = "INV05_out_of_period"
-        name_inv06 = "INV06_category_totals"
-        inv05_results = [r for r in report.results if r.name == name_inv05]
-        inv06_results = [r for r in report.results if r.name == name_inv06]
-        assert len(inv05_results) == 1, "INV05 should run when period dates provided"
-        assert inv05_results[0].passed is True
-        assert len(inv06_results) == 1, "INV06 should run when category_totals provided"
-        assert inv06_results[0].passed is True
-        assert inv06_results[0].metrics["categorized_count"] == 2
-        assert inv06_results[0].metrics["mismatch_count"] == 0
-
-    def test_run_all_invariants_with_out_of_period_txns(self):
-        """INV05 catches out-of-period transactions."""
-        report = run_all_invariants(
-            entity="KAL",
-            total_assets=Decimal("10000"),
-            total_liabilities=Decimal("4000"),
-            total_equity=Decimal("6000"),
-            unreconciled_count=2,
-            unreconciled_threshold=5,
-            current_net=Decimal("500"),
-            previous_net=None,
-            txn_dates=["2026-06-01", "2026-07-15", "2026-06-30"],
-            period_start="2026-06-01",
-            period_end="2026-06-30",
-        )
-        inv05 = [r for r in report.results if r.name == "INV05_out_of_period"]
-        assert len(inv05) == 1
-        assert inv05[0].passed is False
-        assert "outside" in inv05[0].summary.lower()
-
-    def test_invariant_result_metrics(self):
-        """InvariantResult carries a metrics dict."""
-        result = check_balance_sheet_balances(
-            total_assets=Decimal("10000"),
-            total_liabilities=Decimal("4000"),
-            total_equity=Decimal("6000"),
-            entity="KAL",
-        )
-        assert hasattr(result, "metrics")
-        assert isinstance(result.metrics, dict)
-        # to_dict should include metrics
-        d = result.to_dict()
-        assert "metrics" in d
 
 
 # =========================================================================

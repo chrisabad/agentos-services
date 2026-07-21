@@ -10,6 +10,7 @@ Flow:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -17,16 +18,18 @@ from typing import Any, Dict, List, Optional
 
 from .config import (
     EntityConfig,
+    Entity,
     load_config,
     period_start_end,
     last_completed_month,
 )
 from .invariants import (
     InvariantReport,
+    InvariantResult,
     run_all_invariants,
 )
 from .xero_adapter import XeroAdapter, XeroData, BankTransaction
-from .monarch_adapter import MonarchAdapter, MonarchData
+from .monarch_adapter import MonarchAdapter, MonarchData, MonarchTransaction
 
 # ---------------------------------------------------------------------------
 # Types
@@ -228,12 +231,9 @@ def _run_xero_entity(
         previous_net=previous_net,
         txn_dates=txn_date_strs,
         category_totals=category_totals,
-        statement_totals=None if data.bank_statement_totals is None else data.bank_statement_totals,
         balance_sheet_cash=balance_sheet_cash,
         bank_statement_balance=None,  # Not available via API — manual step
         prior_month_summary=prior_month_summary,
-        period_start=start.isoformat(),
-        period_end=end.isoformat(),
     )
 
     # Flag transactions above materiality threshold
@@ -283,10 +283,7 @@ def _run_monarch_entity(
         previous_net=None,
         txn_dates=txn_date_strs,
         category_totals=category_totals,
-        statement_totals=None,           # Monarch has no statement totals
         prior_month_summary=prior_month_summary,
-        period_start=start.isoformat(),
-        period_end=end.isoformat(),
     )
 
     # Flag large expenses

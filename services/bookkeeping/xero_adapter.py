@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from .config import EntityConfig
+from .config import EntityConfig, Entity
 
 # ---------------------------------------------------------------------------
 # Types
@@ -71,7 +72,6 @@ class XeroData:
     balance_sheet: Optional[BalanceSheet] = None
     unreconciled_count: int = 0
     total_txns: int = 0
-    bank_statement_totals: Optional[Dict[str, Decimal]] = None
 
 # ---------------------------------------------------------------------------
 # Adapter

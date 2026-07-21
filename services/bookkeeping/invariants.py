@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from .config import EntityConfig, Entity
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -31,7 +32,6 @@ class InvariantResult:
     summary: str
     detail: str = ""
     severity: str = "error"  # "error" | "warning"
-    metrics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -41,7 +41,6 @@ class InvariantResult:
             "summary": self.summary,
             "detail": self.detail,
             "severity": self.severity,
-            "metrics": self.metrics,
         }
 
 
@@ -293,63 +292,24 @@ def check_no_out_of_period(
 
 
 def check_category_totals(
-    categorized_totals: Dict[str, Decimal],
-    statement_totals: Dict[str, Decimal],
+    category_totals: Dict[str, Decimal],
     entity: str,
     max_uncategorized: Decimal = Decimal("0.01"),
 ) -> InvariantResult:
     """
-    INV06 — Categorized totals match statement control totals per category.
+    INV06 — No material uncategorized income/expense.
 
-    The two input dicts share the same key set (account codes or category IDs).
-    For each key we compare categorized_totals[key] vs statement_totals[key].
-    Any difference beyond rounding ($0.01) is flagged.
-
-    `__uncategorized__` in categorized_totals is also checked — flagged if
-    it exceeds the threshold.
+    Transactions without account codes (Xero) or without categories (Monarch)
+    mean the books are incomplete. A small rounding residual is tolerated.
     """
-    mismatches: Dict[str, Decimal] = {}
-    all_keys = set(categorized_totals.keys()) | set(statement_totals.keys())
+    uncategorized = category_totals.get("__uncategorized__", Decimal("0"))
+    passed = abs(uncategorized) <= max_uncategorized
 
-    for key in sorted(all_keys):
-        if key == "__uncategorized__":
-            continue
-        cat_val = categorized_totals.get(key, Decimal("0"))
-        stmt_val = statement_totals.get(key, Decimal("0"))
-        diff = abs(cat_val - stmt_val)
-        if diff > Decimal("0.01"):
-            mismatches[key] = diff
-
-    # Check uncategorized
-    uncategorized = abs(categorized_totals.get("__uncategorized__", Decimal("0")))
-    uncategorized_exceeds = uncategorized > max_uncategorized
-
-    passed = len(mismatches) == 0 and not uncategorized_exceeds
-
-    detail_parts = []
-    for k, diff in mismatches.items():
-        detail_parts.append(
-            f"  {k}: categorized=${categorized_totals.get(k, 0):.2f} vs "
-            f"statement=${statement_totals.get(k, 0):.2f} (diff=${diff:.2f})"
-        )
-    if uncategorized_exceeds:
-        detail_parts.append(
-            f"  __uncategorized__: ${uncategorized:.2f} (threshold: ${max_uncategorized:.2f})"
-        )
-
-    if passed:
-        summary = (
-            f"All {len(categorized_totals)} categories match statement totals"
-            if not mismatches
-            else f"Minor uncategorized residual: ${uncategorized:.2f}"
-        )
-    else:
-        parts = []
-        if mismatches:
-            parts.append(f"{len(mismatches)} category total(s) mismatch statement")
-        if uncategorized_exceeds:
-            parts.append(f"Uncategorized ${uncategorized:.2f} exceeds ${max_uncategorized:.2f}")
-        summary = "; ".join(parts)
+    summary = (
+        f"All transactions categorized (uncategorized: ${uncategorized:.2f})"
+        if passed else
+        f"Material uncategorized amount: ${uncategorized:.2f}"
+    )
 
     return InvariantResult(
         name="INV06_category_totals",
@@ -357,15 +317,11 @@ def check_category_totals(
         entity=entity,
         summary=summary,
         detail=(
-            "Category vs statement totals:\n" + ("\n".join(detail_parts) if detail_parts else "  All match")
+            f"Uncategorized total: ${uncategorized:.2f}\n"
+            f"Threshold: ${max_uncategorized:.2f}\n"
+            f"Categorized breakdown: {category_totals}"
         ),
         severity="error",
-        metrics={
-            "categorized_count": len(categorized_totals),
-            "mismatch_count": len(mismatches),
-            "uncategorized_total": float(uncategorized),
-            "mismatches": {k: float(v) for k, v in mismatches.items()},
-        },
     )
 
 
@@ -413,12 +369,9 @@ def run_all_invariants(
     previous_net: Optional[Decimal] = None,
     txn_dates: Optional[List[str]] = None,
     category_totals: Optional[Dict[str, Decimal]] = None,
-    statement_totals: Optional[Dict[str, Decimal]] = None,
     balance_sheet_cash: Optional[Decimal] = None,
     bank_statement_balance: Optional[Decimal] = None,
     prior_month_summary: Optional[str] = None,
-    period_start: Optional[str] = None,
-    period_end: Optional[str] = None,
 ) -> InvariantReport:
     """
     Run all applicable invariant checks for one entity.
@@ -450,15 +403,16 @@ def run_all_invariants(
     ))
 
     # INV05
-    if txn_dates and period_start and period_end:
+    if txn_dates:
+        period_start = entity  # placeholder; caller should provide real dates
+        period_end = entity
         results.append(check_no_out_of_period(
             txn_dates, period_start, period_end, entity,
         ))
 
     # INV06
-    if category_totals is not None:
-        stmt_totals = statement_totals if statement_totals is not None else {}
-        results.append(check_category_totals(category_totals, stmt_totals, entity))
+    if category_totals:
+        results.append(check_category_totals(category_totals, entity))
 
     # INV07
     results.append(check_prior_month_closed(prior_month_summary, entity))

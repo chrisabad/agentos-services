@@ -10,12 +10,22 @@ Endpoints:
 
 from __future__ import annotations
 
+import os
+from datetime import date
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from services.bookkeeping import run_bookkeeping_pipeline
+from services.bookkeeping.invariants import (
+    check_balance_sheet_balances,
+    check_bank_vs_ledger,
+    check_unreconciled_count,
+    check_mom_delta,
+    check_no_out_of_period,
+    check_category_totals,
+)
 
 
 # ---------------------------------------------------------------------------
