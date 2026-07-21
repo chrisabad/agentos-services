@@ -7,8 +7,9 @@ materiality thresholds, and data-source connections.
 
 from __future__ import annotations
 
-import json
 import os
+import json
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Dict, Optional
@@ -138,6 +139,7 @@ DEFAULT_CONFIGS = {
         single_txn_flag=100.0,
         materiality_threshold=500.0,
         chart=KAL_CHART,
+        rules_path="/paperclip/repos/agentos-services/services/bookkeeping/rules/kal.rules",
     ),
     Entity.FON: EntityConfig(
         entity_id=Entity.FON,
@@ -150,6 +152,7 @@ DEFAULT_CONFIGS = {
         single_txn_flag=100.0,
         materiality_threshold=100.0,
         chart=FON_CHART,
+        rules_path="/paperclip/repos/agentos-services/services/bookkeeping/rules/fon.rules",
     ),
     Entity.PER: EntityConfig(
         entity_id=Entity.PER,
@@ -174,7 +177,7 @@ def load_config(entity_id: str, config_path: Optional[str] = None) -> EntityConf
     if entity_id not in DEFAULT_CONFIGS:
         raise ValueError(f"Unknown entity: {entity_id}. Valid: {list(DEFAULT_CONFIGS.keys())}")
 
-    base = DEFAULT_CONFIGS[entity_id]
+    base = deepcopy(DEFAULT_CONFIGS[entity_id])
 
     if config_path and os.path.exists(config_path):
         with open(config_path) as f:

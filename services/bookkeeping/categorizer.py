@@ -39,7 +39,7 @@ class CategorizationResult:
     suggested_category_id: Optional[str]
     suggested_category_name: Optional[str]
     confidence: float  # 0.0–1.0
-    source: str         # "rule" | "model" | "judge" | "uncategorized"
+    source: str         # "existing" | "rule" | "model" | "judge" | "uncategorized"
     needs_judge: bool   # True when confidence is below threshold for value
     reviewed: bool = False
     approved: bool = False
@@ -299,6 +299,182 @@ class ModelCategorizer:
 
         except (httpx.HTTPError, httpx.TimeoutException, KeyError, json.JSONDecodeError):
             return None, None, 0.0
+
+
+# ---------------------------------------------------------------------------
+# Judge-tier spot verifier (second-pass model)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class JudgeVerdict:
+    """Result of judge-tier spot verification on one categorization."""
+    transaction_id: str
+    original_category_id: Optional[str]
+    original_confidence: float
+    judge_category_id: Optional[str]
+    judge_confidence: float
+    agrees: bool  # True when judge agrees with primary model
+    rationale: str = ""
+
+
+class JudgeCategorizer:
+    """Second-pass LLM spot verification for high-value or uncertain model categorizations.
+
+    Flow:
+      1. Receives a model-categorized transaction that triggers judge review
+         (based on materiality, novelty, or low confidence).
+      2. Sends to the 'judge' LiteLLM model alias with a verification prompt.
+      3. If judge disagrees with the primary model, the disagreement is
+         flagged in the report — never blocks, never overrides.
+      4. Approved disagreements may still be learned as rules via the
+         existing approve_and_learn mechanism.
+
+    The judge has NO authority to override the primary model — only to flag.
+    This keeps the pipeline fast: model applies, judge audits.
+    """
+
+    def __init__(self, config: EntityConfig):
+        self.config = config
+        self.base_url = os.environ.get(
+            "LITELLM_BASE_URL",
+            "https://litellm-nnhx.srv1724463.hstgr.cloud",
+        )
+        self.api_key = os.environ.get("OLLAMA_API_KEY", "")
+        self._client: Optional[httpx.Client] = None
+
+    def _client_get(self) -> httpx.Client:
+        if self._client is None:
+            self._client = httpx.Client(
+                base_url=self.base_url,
+                timeout=httpx.Timeout(30.0),
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+        return self._client
+
+    def verify(
+        self,
+        transaction_id: str,
+        merchant: Optional[str],
+        description: str,
+        amount: Decimal,
+        model_category_id: Optional[str],
+        model_confidence: float,
+        available_categories: Dict[str, str],
+    ) -> JudgeVerdict:
+        """Ask the judge model to verify a model's categorization.
+
+        Returns a JudgeVerdict with the judge's own category choice and
+        whether it agrees with the primary model. Never raises — returns
+        an agrees=True verdict on failure so the pipeline stays unblocked.
+        """
+        if not self.api_key or model_category_id is None:
+            return JudgeVerdict(
+                transaction_id=transaction_id,
+                original_category_id=model_category_id,
+                original_confidence=model_confidence,
+                judge_category_id=model_category_id,
+                judge_confidence=0.0,
+                agrees=True,
+                rationale="Judge skipped (no API key or uncategorized input)",
+            )
+
+        categories_text = "; ".join(
+            f"{k}: {v}" for k, v in sorted(available_categories.items())
+        )
+
+        prompt = (
+            "You are a senior accounting reviewer. A primary categorizer has assigned "
+            "a category to this transaction. Your job is to VERIFY — confirm or flag. "
+            "Respond with ONLY: CATEGORY_ID||CONFIDENCE||RATIONALE\n\n"
+            f"Primary model assigned: {model_category_id}\n"
+            f"Merchant: {merchant or '(unknown)'}\n"
+            f"Description: {description}\n"
+            f"Amount: ${float(abs(amount)):.2f}\n\n"
+            f"Available categories:\n{categories_text}\n\n"
+            "Your verdict (category_id||0.0-1.0 confidence||brief rationale):"
+        )
+
+        try:
+            client = self._client_get()
+            resp = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "judge",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a precise accounting judge. Verify the assigned "
+                                "category and respond with exactly: CATEGORY_ID||CONFIDENCE||RATIONALE. "
+                                "CONFIDENCE is 0.0-1.0. RATIONALE is a single short sentence. "
+                                "If you disagree, give the correct category ID."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 100,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = (data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                    .strip())
+
+            if not text or "||" not in text:
+                # Judge didn't follow format — default to agrees
+                return JudgeVerdict(
+                    transaction_id=transaction_id,
+                    original_category_id=model_category_id,
+                    original_confidence=model_confidence,
+                    judge_category_id=model_category_id,
+                    judge_confidence=0.0,
+                    agrees=True,
+                    rationale=f"Judge response unparseable: {text[:100]}",
+                )
+
+            parts = text.split("||", 2)
+            judge_cat_id = parts[0].strip(' "\'')
+            try:
+                judge_confidence = float(parts[1].strip())
+            except (ValueError, IndexError):
+                judge_confidence = 0.0
+            rationale = parts[2].strip() if len(parts) > 2 else ""
+
+            # Validate judge's category exists in chart
+            if judge_cat_id not in available_categories:
+                judge_cat_id = model_category_id
+                judge_confidence = 0.0
+                rationale = "Judge selected invalid category — defaulting to primary"
+
+            agrees = judge_cat_id == model_category_id
+
+            return JudgeVerdict(
+                transaction_id=transaction_id,
+                original_category_id=model_category_id,
+                original_confidence=model_confidence,
+                judge_category_id=judge_cat_id,
+                judge_confidence=min(judge_confidence, 1.0),
+                agrees=agrees,
+                rationale=rationale,
+            )
+
+        except (httpx.HTTPError, httpx.TimeoutException, KeyError, json.JSONDecodeError) as e:
+            return JudgeVerdict(
+                transaction_id=transaction_id,
+                original_category_id=model_category_id,
+                original_confidence=model_confidence,
+                judge_category_id=model_category_id,
+                judge_confidence=0.0,
+                agrees=True,
+                rationale=f"Judge API error: {type(e).__name__} — defaulting to agree",
+            )
 
 
 # ---------------------------------------------------------------------------
