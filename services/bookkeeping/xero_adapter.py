@@ -451,26 +451,56 @@ class XeroAdapter:
           all items in that section by the section type.
         - Unknown/combined sections (empty title, "Other Income and Expense")
           classify each line item by its sign: positive → revenue, negative → expenses.
+        - SummaryRow rows and computed-total rows (Net Income, Gross Profit, etc.)
+          are skipped — they are derived totals, not individual line items.
         """
         revenue = Decimal("0")
         expenses = Decimal("0")
 
+        # Titles that indicate a computed/summary row (not a real line item)
+        COMPUTED_TOTAL_KEYWORDS = (
+            "net income", "gross profit", "operating income",
+            "total comprehensive income", "net earnings",
+            "total expenses", "total revenue", "total income",
+            "net operating income",
+            "total",  # Catch any "Total ..." row (e.g. "Total Other Income and Expense")
+        )
+
+        def _is_computed_total(title: str) -> bool:
+            """Check if a row title indicates a computed total."""
+            t = title.lower().strip()
+            return any(kw in t for kw in COMPUTED_TOTAL_KEYWORDS)
+
         def _walk_rows(rows: List[Dict[str, Any]], section_type: Optional[str] = None) -> None:
-            """Recursively walk row tree, tracking section type."""
+            """Recursively walk row tree, tracking section type.
+
+            Uses a `last_section` variable that persists across siblings,
+            so a section with empty Rows still propagates its type to
+            subsequent sibling rows (e.g. KAL's P&L where the Revenue
+            section header has no sub-rows and the line items are siblings).
+            """
             nonlocal revenue, expenses
+            last_section = section_type  # Persists across siblings
             for row in rows:
+                row_type = row.get("RowType", "")
                 title = (row.get("Title") or "").lower()
                 sub_rows = row.get("Rows", [])
 
+                # Skip header rows and summary rows (computed totals)
+                if row_type in ("Header", "SummaryRow"):
+                    continue
+
                 # Determine section type from this row's title
-                current_section = section_type
+                current_section = last_section
                 # Skip combined sections like "Other Income and Expense"
                 if "other" in title and ("income" in title or "expense" in title):
-                    pass  # Treat as unknown — classify by sign
+                    current_section = None  # Treat as unknown — classify by sign
+                    last_section = None  # Don't propagate "other" section type to siblings
                 elif any(kw in title for kw in ("revenue", "income", "sales")):
                     current_section = "revenue"
                 elif any(kw in title for kw in ("expenses", "cost of goods", "cost of sales")):
                     current_section = "expenses"
+                last_section = current_section
 
                 # If this row has sub-rows, recurse into them
                 if sub_rows:
@@ -482,10 +512,15 @@ class XeroAdapter:
                 if len(cells) < 2:
                     continue
                 try:
-                    val = Decimal(str(cells[-1].get("Value", "0")))
+                    val = Decimal(str(cells[1].get("Value", "0")))
                 except Exception:
                     continue
                 if val == Decimal("0"):
+                    continue
+
+                # Skip computed total rows (Net Income, Gross Profit, etc.)
+                row_title = (cells[0].get("Value") or "").lower().strip()
+                if _is_computed_total(row_title):
                     continue
 
                 if current_section == "revenue":
@@ -509,6 +544,11 @@ class XeroAdapter:
         Handles both flat and nested section structures by recursively
         walking the row tree. Xero nests sub-sections (Current Assets,
         Non-Current Assets) under the main Assets section.
+
+        Also handles the case where the main section header (e.g. "Assets")
+        has empty Rows and the actual sub-sections (e.g. "Cash and Cash
+        Equivalents") are siblings — the parser inherits the last known
+        major section type.
         """
         assets = Decimal("0")
         liabilities = Decimal("0")
@@ -517,19 +557,26 @@ class XeroAdapter:
         def _walk_rows(rows: List[Dict[str, Any]], section_type: Optional[str] = None) -> None:
             """Recursively walk rows, tracking which section we're in."""
             nonlocal assets, liabilities, equity
+            last_section = section_type  # Persists across siblings
             for row in rows:
+                row_type = row.get("RowType", "")
                 title = (row.get("Title") or "").lower()
                 cells = row.get("Cells", [])
                 sub_rows = row.get("Rows", [])
 
+                # Skip header rows and summary rows (computed totals)
+                if row_type in ("Header", "SummaryRow"):
+                    continue
+
                 # Determine section type from this row's title
-                current_section = section_type
+                current_section = last_section
                 if "assets" in title:
                     current_section = "assets"
                 elif "liabilities" in title:
                     current_section = "liabilities"
                 elif "equity" in title:
                     current_section = "equity"
+                last_section = current_section
 
                 # If this row has sub-rows, recurse into them
                 if sub_rows:
@@ -542,7 +589,7 @@ class XeroAdapter:
                 if len(cells) < 2:
                     continue
                 try:
-                    val = Decimal(str(cells[-1].get("Value", "0")))
+                    val = Decimal(str(cells[1].get("Value", "0")))
                 except Exception:
                     continue
                 if val == Decimal("0"):
@@ -550,9 +597,9 @@ class XeroAdapter:
 
                 # Classify by the section we're in
                 if current_section == "assets":
-                    assets += abs(val)
+                    assets += val  # Keep sign — assets can be negative (contra-accounts)
                 elif current_section == "liabilities":
-                    liabilities += abs(val)
+                    liabilities += val  # Keep sign — liabilities can be negative (credit balances)
                 elif current_section == "equity":
                     equity += val  # Equity can be negative (retained losses)
 

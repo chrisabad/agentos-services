@@ -46,6 +46,9 @@ KAL_CHART: Dict[str, str] = {
     "473": "Travel - International",
     "477": "Travel - National",
     "480": "Wages & Salaries",
+    # Xero system codes used by KAL bank transactions
+    "6030": "Bank Fees",
+    "6340": "Software",
 }
 
 # Font Replacer — Xero Font Replacer org

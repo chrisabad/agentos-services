@@ -603,9 +603,8 @@ def run_all_invariants(
         ))
 
     # INV06
-    if category_totals is not None:
-        stmt_totals = statement_totals if statement_totals is not None else {}
-        results.append(check_category_totals(category_totals, stmt_totals, entity))
+    if category_totals is not None and statement_totals is not None:
+        results.append(check_category_totals(category_totals, statement_totals, entity))
 
     # INV07
     results.append(check_prior_month_closed(prior_month_summary, entity))
