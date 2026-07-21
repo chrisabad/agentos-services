@@ -618,7 +618,7 @@ class TestRunLog:
     def test_write_run_log_write_once(self):
         """write_run_log raises FileExistsError on duplicate write."""
         from services.bookkeeping.pipeline import (
-            write_run_log, RunReport, EntityRun, InvariantReport,
+            write_run_log, RunReport,
         )
         import tempfile
         import os
@@ -713,7 +713,7 @@ class TestRunLog:
     def test_get_run_log_found(self):
         """get_run_log retrieves a specific run by period and timestamp."""
         from services.bookkeeping.pipeline import (
-            write_run_log, get_run_log, RunReport, EntityRun, InvariantReport,
+            write_run_log, get_run_log, RunReport,
         )
         import tempfile
         import services.bookkeeping.pipeline as pl
