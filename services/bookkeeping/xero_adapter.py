@@ -444,77 +444,117 @@ class XeroAdapter:
 
     @staticmethod
     def _parse_p_and_l(report: Dict[str, Any]) -> tuple[Decimal, Decimal]:
-        """Extract total revenue and total expenses from a P&L report."""
+        """Extract total revenue and total expenses from a P&L report.
+
+        Hybrid approach:
+        - Sections with known titles (Revenue, Income, Expenses, COGS) classify
+          all items in that section by the section type.
+        - Unknown/combined sections (empty title, "Other Income and Expense")
+          classify each line item by its sign: positive → revenue, negative → expenses.
+        """
         revenue = Decimal("0")
         expenses = Decimal("0")
 
-        rows = report.get("Rows", [])
-        for section in rows:
-            section_title = (section.get("Title") or "").lower()
+        def _walk_rows(rows: List[Dict[str, Any]], section_type: Optional[str] = None) -> None:
+            """Recursively walk row tree, tracking section type."""
+            nonlocal revenue, expenses
+            for row in rows:
+                title = (row.get("Title") or "").lower()
+                sub_rows = row.get("Rows", [])
 
-            if "revenue" in section_title or "income" in section_title:
-                for row in section.get("Rows", []):
-                    cells = row.get("Cells", [])
-                    if len(cells) >= 2:
-                        try:
-                            val = Decimal(str(cells[-1].get("Value", "0")))
-                            if val > 0:
-                                revenue += val
-                        except Exception:
-                            pass
+                # Determine section type from this row's title
+                current_section = section_type
+                # Skip combined sections like "Other Income and Expense"
+                if "other" in title and ("income" in title or "expense" in title):
+                    pass  # Treat as unknown — classify by sign
+                elif any(kw in title for kw in ("revenue", "income", "sales")):
+                    current_section = "revenue"
+                elif any(kw in title for kw in ("expenses", "cost of goods", "cost of sales")):
+                    current_section = "expenses"
 
-            elif "expenses" in section_title or "cost of goods" in section_title:
-                for row in section.get("Rows", []):
-                    cells = row.get("Cells", [])
-                    if len(cells) >= 2:
-                        try:
-                            val = Decimal(str(cells[-1].get("Value", "0")))
-                            expenses += abs(val)
-                        except Exception:
-                            pass
+                # If this row has sub-rows, recurse into them
+                if sub_rows:
+                    _walk_rows(sub_rows, current_section)
+                    continue
 
+                # Leaf row — check for a numeric value
+                cells = row.get("Cells", [])
+                if len(cells) < 2:
+                    continue
+                try:
+                    val = Decimal(str(cells[-1].get("Value", "0")))
+                except Exception:
+                    continue
+                if val == Decimal("0"):
+                    continue
+
+                if current_section == "revenue":
+                    revenue += abs(val)
+                elif current_section == "expenses":
+                    expenses += abs(val)
+                else:
+                    # Unknown section — classify by sign
+                    if val > 0:
+                        revenue += val
+                    else:
+                        expenses += abs(val)
+
+        _walk_rows(report.get("Rows", []))
         return revenue, expenses
 
     @staticmethod
     def _parse_balance_sheet(report: Dict[str, Any]) -> tuple[Decimal, Decimal, Decimal]:
-        """Extract total assets, liabilities, and equity from a Balance Sheet."""
+        """Extract total assets, liabilities, and equity from a Balance Sheet.
+
+        Handles both flat and nested section structures by recursively
+        walking the row tree. Xero nests sub-sections (Current Assets,
+        Non-Current Assets) under the main Assets section.
+        """
         assets = Decimal("0")
         liabilities = Decimal("0")
         equity = Decimal("0")
 
-        rows = report.get("Rows", [])
-        for section in rows:
-            title = (section.get("Title") or "").lower()
+        def _walk_rows(rows: List[Dict[str, Any]], section_type: Optional[str] = None) -> None:
+            """Recursively walk rows, tracking which section we're in."""
+            nonlocal assets, liabilities, equity
+            for row in rows:
+                title = (row.get("Title") or "").lower()
+                cells = row.get("Cells", [])
+                sub_rows = row.get("Rows", [])
 
-            if "assets" in title:
-                for row in section.get("Rows", []):
-                    cells = row.get("Cells", [])
-                    if len(cells) >= 2:
-                        try:
-                            assets += Decimal(str(cells[-1].get("Value", "0")))
-                        except Exception:
-                            pass
+                # Determine section type from this row's title
+                current_section = section_type
+                if "assets" in title:
+                    current_section = "assets"
+                elif "liabilities" in title:
+                    current_section = "liabilities"
+                elif "equity" in title:
+                    current_section = "equity"
 
-            elif "liabilities" in title:
-                for row in section.get("Rows", []):
-                    cells = row.get("Cells", [])
-                    if len(cells) >= 2:
-                        try:
-                            val = Decimal(str(cells[-1].get("Value", "0")))
-                            if "equity" not in title.lower():
-                                liabilities += abs(val)
-                            else:
-                                equity += abs(val)
-                        except Exception:
-                            pass
+                # If this row has sub-rows, recurse into them
+                if sub_rows:
+                    _walk_rows(sub_rows, current_section)
+                    # After recursing, skip the leaf-value check below
+                    # (section headers with sub-rows may also have a total cell)
+                    continue
 
-            elif "equity" in title:
-                for row in section.get("Rows", []):
-                    cells = row.get("Cells", [])
-                    if len(cells) >= 2:
-                        try:
-                            equity += Decimal(str(cells[-1].get("Value", "0")))
-                        except Exception:
-                            pass
+                # Leaf row — check for a numeric value
+                if len(cells) < 2:
+                    continue
+                try:
+                    val = Decimal(str(cells[-1].get("Value", "0")))
+                except Exception:
+                    continue
+                if val == Decimal("0"):
+                    continue
 
+                # Classify by the section we're in
+                if current_section == "assets":
+                    assets += abs(val)
+                elif current_section == "liabilities":
+                    liabilities += abs(val)
+                elif current_section == "equity":
+                    equity += val  # Equity can be negative (retained losses)
+
+        _walk_rows(report.get("Rows", []))
         return assets, liabilities, equity
