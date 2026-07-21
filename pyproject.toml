@@ -18,6 +18,8 @@ dependencies = [
   "pyyaml>=6.0",
   "sqlalchemy>=2.0",
   "psycopg2-binary>=2.9",
+  "aiohttp>=3.9",
+  "requests>=2.31",
 ]
 
 [project.optional-dependencies]
@@ -34,7 +36,7 @@ include = ["services*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["services/memory/tests", "services/broker/tests", "services/feedback/tests", "services/router/tests", "services/reports/tests", "services/notifications/tests"]
+testpaths = ["services/memory/tests", "services/broker/tests", "services/feedback/tests", "services/router/tests", "services/reports/tests", "services/notifications/tests", "services/bookkeeping/tests"]
 
 [tool.setuptools.package-data]
 "services.router" = ["*.yaml"]
