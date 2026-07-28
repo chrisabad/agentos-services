@@ -3,7 +3,10 @@
 FON Daily BI Report — delivery script
 Runs the toolkit, formats the report, posts to Slack DM + Paperclip comment.
 """
-import os, subprocess, json, urllib.request
+import json
+import os
+import subprocess
+import urllib.request
 
 # ── Fetch secrets ──
 def get_secret(secret_id):
@@ -31,7 +34,7 @@ env["AMPLITUDE_SECRET_KEY"] = amplitude_secret
 
 result = subprocess.run(
     ["node", "/paperclip/repos/agentos-services/services/business_intelligence/bi-toolkit.cjs"],
-    capture_output=True, text=True, timeout=30, env=env
+    capture_output=True, text=True, timeout=120, env=env
 )
 report = json.loads(result.stdout)
 
