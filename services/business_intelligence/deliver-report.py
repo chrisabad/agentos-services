@@ -115,6 +115,22 @@ if recs:
         lines.append(f"  {icon} [{r['priority'].upper()}] {r['action']}")
         lines.append(f"     {r['detail']}")
     lines.append("")
+
+lines.append("AMPLITUDE ACTIVE USERS")
+lines.append("-" * 40)
+amp = report.get("metrics", {}).get("amplitude", {})
+if amp.get("status") == "available" and amp.get("data"):
+    d = amp["data"]
+    lines.append(f"  DAU today:        {d.get('dauToday', 'N/A'):>8}")
+    lines.append(f"  DAU yesterday:    {d.get('dauYesterday', 'N/A'):>8}")
+    lines.append(f"  7-day avg DAU:    {d.get('dau7DayAvg', 'N/A'):>8}")
+    lines.append(f"  Total unique (90d): {d.get('totalUniqueUsers', 'N/A'):>8}")
+    lines.append(f"  Events in window: {d.get('totalEvents', 'N/A'):>8}")
+else:
+    lines.append(f"  Status: {amp.get('status', 'unavailable')}")
+    if amp.get("error"):
+        lines.append(f"  Error: {amp['error']}")
+lines.append("")
 lines.append("DATA SOURCES")
 lines.append("-" * 40)
 lines.append(f"  LemonSqueezy:     OK ({subs['totalSubscriptions']} subscriptions)")
@@ -204,6 +220,19 @@ slack_payload["blocks"].append({
     "type": "section",
     "text": {"type": "mrkdwn", "text": "*Opportunities*\n" + "\n".join(opp_lines)}
 })
+
+
+# ── Amplitude DAU ──
+amp = report.get("metrics", {}).get("amplitude", {})
+if amp.get("status") == "available" and amp.get("data"):
+    d = amp["data"]
+    dau_lines = []
+    dau_lines.append(f"*DAU today:* {d.get('dauToday', 'N/A')}  |  *DAU yesterday:* {d.get('dauYesterday', 'N/A')}  |  *7-day avg:* {d.get('dau7DayAvg', 'N/A')}")
+    dau_lines.append(f"*Total unique users (90d):* {d.get('totalUniqueUsers', 'N/A')}  |  *Events:* {d.get('totalEvents', 0):,}")
+    slack_payload["blocks"].append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*Amplitude Active Users*\n" + "\n".join(dau_lines)}
+    })
 
 # ── Plain Customer Timeline ──
 plain = report["metrics"]["plain"]

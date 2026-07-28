@@ -20,6 +20,8 @@
 
 const https = require('https');
 const http = require('http');
+const zlib = require('zlib');
+const { Buffer } = require('buffer');
 
 // ── Config ──────────────────────────────────────────────────────────────────────
 const LS_API_BASE = 'https://api.lemonsqueezy.com/v1';
@@ -66,6 +68,21 @@ function post(url, body, headers = {}) {
     req.on('error', reject);
     req.write(bodyStr);
     req.end();
+  });
+}
+
+
+/**
+ * Fetch a binary response as a Buffer. Used for Amplitude export zip.
+ */
+function fetchBinary(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? https : http;
+    mod.get(url, options, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    }).on('error', reject);
   });
 }
 
@@ -129,22 +146,98 @@ async function fetchLSOrders() {
 // + agentos/fon/amplitude_secret_key — project-scoped to Font Replacer, do NOT reuse
 // chrisabad/amplitude/api_key, that is the chrisabad.com portfolio's key).
 //
-// The Amplitude /2/export endpoint is NOT a lightweight "active users" query — it
-// returns a multi-MB zip of gzipped NDJSON event files meant for warehouse ETL, and
-// requires unzip + gunzip + per-line JSON parsing to turn into a DAU number. That's
-// real engineering (see FON follow-up issue), not something to rush into a script
-// that a daily cron depends on. Pulling that payload here also risks blowing
-// deliver-report.py's 30s subprocess timeout and crashing the whole report.
-// Until the export-parsing pipeline is built, verify credentials cheaply via the
-// Dashboard REST API's taxonomy endpoint (fast, plain JSON, no auth surprises) and
-// report Amplitude as explicitly "not yet implemented" rather than silently
-// returning unparsed zip bytes as if they were usable data.
+// The Amplitude /2/export endpoint returns a zip of gzipped NDJSON event files.
+// This implementation:
+//   1. Fetches the zip as binary
+//   2. Parses the stored-zip container (no compression at zip level — store method)
+//   3. Gunzips each member file
+//   4. Parses NDJSON lines, counting distinct user_ids per day for DAU
+//   5. Returns a summary with DAU per day and total active users in the window
+
+/**
+ * Parse a stored (no-compression) zip buffer into an array of {name, buffer} entries.
+ * Amplitude's export zip uses the 'store' method (0), so we don't need a full
+ * inflate — just walk the local file headers.
+ */
+function parseStoredZip(buf) {
+  const entries = [];
+  let offset = 0;
+
+  while (offset < buf.length - 30) {
+    // Local file header signature: 0x04034b50
+    if (buf.readUInt32LE(offset) !== 0x04034b50) break;
+
+    const versionNeeded = buf.readUInt16LE(offset + 4);
+    const flags = buf.readUInt16LE(offset + 6);
+    const compression = buf.readUInt16LE(offset + 8);
+    const crc32 = buf.readUInt32LE(offset + 14);
+    const compressedSize = buf.readUInt32LE(offset + 18);
+    const uncompressedSize = buf.readUInt32LE(offset + 22);
+    const nameLen = buf.readUInt16LE(offset + 26);
+    const extraLen = buf.readUInt16LE(offset + 28);
+
+    const name = buf.slice(offset + 30, offset + 30 + nameLen).toString('utf-8');
+    const dataStart = offset + 30 + nameLen + extraLen;
+
+    if (compression === 0) {
+      // Stored (no compression at zip level)
+      entries.push({ name, buffer: buf.slice(dataStart, dataStart + uncompressedSize) });
+    } else if (compression === 8) {
+      // Deflated — shouldn't happen for Amplitude but handle gracefully
+      try {
+        const inflated = zlib.inflateRawSync(buf.slice(dataStart, dataStart + compressedSize));
+        entries.push({ name, buffer: inflated });
+      } catch (e) {
+        entries.push({ name, buffer: null, error: 'inflate failed: ' + e.message });
+      }
+    } else {
+      entries.push({ name, buffer: null, error: 'unsupported compression method: ' + compression });
+    }
+
+    offset = dataStart + compressedSize;
+  }
+
+  return entries;
+}
+
+/**
+ * Parse NDJSON lines from a buffer, counting distinct user_ids per day.
+ * Returns a map of date -> Set of user_ids.
+ */
+function countDAUFromNDJSON(buf) {
+  const byDay = {};
+  const text = buf.toString('utf-8');
+  const lines = text.split('\n').filter(l => l.trim());
+
+  for (const line of lines) {
+    try {
+      const evt = JSON.parse(line);
+      const userId = evt.user_id || evt.device_id || evt.event_id;
+      if (!userId) continue;
+
+      // Amplitude event time is epoch milliseconds
+      const ts = evt.time || evt.event_time;
+      if (!ts) continue;
+
+      const date = new Date(typeof ts === 'number' ? ts : parseInt(ts, 10)).toISOString().slice(0, 10);
+      if (!byDay[date]) byDay[date] = new Set();
+      byDay[date].add(String(userId));
+    } catch {
+      // skip malformed lines
+    }
+  }
+
+  return byDay;
+}
+
 async function fetchAmplitudeEvents(daysBack = 90) {
   if (!AMPLITUDE_API_KEY || !AMPLITUDE_SECRET_KEY) return { error: 'AMPLITUDE_API_KEY or AMPLITUDE_SECRET_KEY not set' };
 
   const auth = Buffer.from(AMPLITUDE_API_KEY + ':' + AMPLITUDE_SECRET_KEY).toString('base64');
-  const probe = await fetch(AMPLITUDE_DASHBOARD_BASE + '/2/taxonomy/event', { headers: { Authorization: 'Basic ' + auth } });
+  const authHeader = { Authorization: 'Basic ' + auth };
 
+  // Step 1: Verify credentials with a cheap taxonomy probe
+  const probe = await fetch(AMPLITUDE_DASHBOARD_BASE + '/2/taxonomy/event', { headers: authHeader });
   if (probe && probe.error) {
     return { error: 'Amplitude credentials invalid: ' + JSON.stringify(probe.error) };
   }
@@ -152,12 +245,121 @@ async function fetchAmplitudeEvents(daysBack = 90) {
     return { error: 'Amplitude credential check returned an unexpected (non-JSON) response' };
   }
 
-  // Credentials verified live against Amplitude. Real usage-metrics extraction
-  // (DAU, active users, event correlation) needs the export zip/gunzip/NDJSON
-  // pipeline — not yet implemented. See FON follow-up issue.
-  return { error: 'Amplitude credentials verified OK — usage-metrics pipeline (zip export parsing) not yet implemented' };
-}
+  // Step 2: Fetch export zip
+  const now = new Date();
+  const end = new Date(now.getTime() + 86400000); // +1 day for timezone safety
+  const start = new Date(now.getTime() - daysBack * 86400000);
 
+  const fmt = (d) => {
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    const h = String(d.getUTCHours()).padStart(2, '0');
+    return y + m + day + 'T' + h;
+  };
+
+  const exportUrl = AMPLITUDE_EXPORT_BASE + '/export?start=' + fmt(start) + '&end=' + fmt(end);
+
+  let zipBuf;
+  try {
+    zipBuf = await fetchBinary(exportUrl, { headers: authHeader });
+  } catch (err) {
+    return { error: 'Amplitude export fetch failed: ' + err.message };
+  }
+
+  if (!zipBuf || zipBuf.length < 4) {
+    return { error: 'Amplitude export returned empty response' };
+  }
+
+  // Check if it's actually a zip (PK\x03\x04 signature)
+  if (zipBuf.readUInt32LE(0) !== 0x04034b50) {
+    // Might be an error response as JSON
+    try {
+      const text = zipBuf.toString('utf-8');
+      const json = JSON.parse(text);
+      return { error: 'Amplitude export returned error: ' + JSON.stringify(json) };
+    } catch {
+      return { error: 'Amplitude export returned non-zip, non-JSON response (' + zipBuf.length + ' bytes)' };
+    }
+  }
+
+  // Step 3: Parse the zip
+  const entries = parseStoredZip(zipBuf);
+  if (entries.length === 0) {
+    return { error: 'Amplitude export zip contained no entries' };
+  }
+
+  // Step 4: Gunzip each entry and count DAU
+  const allByDay = {};
+  let totalEvents = 0;
+  let parseErrors = 0;
+
+  for (const entry of entries) {
+    if (entry.error) {
+      parseErrors++;
+      continue;
+    }
+    if (!entry.buffer || entry.buffer.length === 0) continue;
+
+    let ndjsonBuf;
+    try {
+      ndjsonBuf = zlib.gunzipSync(entry.buffer);
+    } catch {
+      // Some entries may not be gzipped (e.g. small ones)
+      ndjsonBuf = entry.buffer;
+    }
+
+    const dayMap = countDAUFromNDJSON(ndjsonBuf);
+    for (const [date, users] of Object.entries(dayMap)) {
+      if (!allByDay[date]) allByDay[date] = new Set();
+      for (const uid of users) allByDay[date].add(uid);
+      totalEvents += users.size;
+    }
+  }
+
+  // Step 5: Build summary
+  const sortedDates = Object.keys(allByDay).sort();
+  const dauByDay = sortedDates.map(date => ({
+    date,
+    activeUsers: allByDay[date].size,
+  }));
+
+  // Total unique users across the entire window
+  const allUsers = new Set();
+  for (const users of Object.values(allByDay)) {
+    for (const uid of users) allUsers.add(uid);
+  }
+
+  // Recent DAU (last 7 days average)
+  const last7 = sortedDates.filter(d => {
+    const ms = new Date(d).getTime();
+    return ms >= now.getTime() - 7 * 86400000;
+  });
+  const avgDAU7 = last7.length > 0
+    ? Math.round(last7.reduce((sum, d) => sum + allByDay[d].size, 0) / last7.length)
+    : 0;
+
+  // Today's DAU
+  const todayStr = now.toISOString().slice(0, 10);
+  const todayDAU = allByDay[todayStr]?.size || 0;
+
+  // Yesterday's DAU
+  const yesterdayStr = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+  const yesterdayDAU = allByDay[yesterdayStr]?.size || 0;
+
+  return {
+    status: 'available',
+    totalUniqueUsers: allUsers.size,
+    totalEvents,
+    dauToday: todayDAU,
+    dauYesterday: yesterdayDAU,
+    dau7DayAvg: avgDAU7,
+    dauByDay: dauByDay.slice(-30), // last 30 days
+    daysInWindow: sortedDates.length,
+    filesParsed: entries.length,
+    parseErrors,
+  };
+}
 // ── Plain ────────────────────────────────────────────────────────────────────────
 async function fetchPlainTimeline() {
   if (!PLAIN_API_KEY) return { error: 'PLAIN_API_KEY not set' };
@@ -527,6 +729,20 @@ function formatSlackReport(report) {
     blocks.push({
       type: 'section',
       text: { type: 'mrkdwn', text: '*Trends & Insights*\n' + trendsLines.join('\n') },
+    });
+  }
+
+
+  // Amplitude DAU section
+  const amp = report.metrics.amplitude;
+  if (amp && amp.status === 'available' && amp.data) {
+    const d = amp.data;
+    const dauLines = [];
+    dauLines.push('*DAU today:* ' + d.dauToday + '  |  *DAU yesterday:* ' + d.dauYesterday + '  |  *7-day avg:* ' + d.dau7DayAvg);
+    dauLines.push('*Total unique users (90d):* ' + d.totalUniqueUsers + '  |  *Events:* ' + d.totalEvents.toLocaleString());
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*Amplitude Active Users*\n' + dauLines.join('\n') },
     });
   }
 
