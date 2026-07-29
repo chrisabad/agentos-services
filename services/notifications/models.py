@@ -33,7 +33,7 @@ PriorityT = Literal["immediate", "daily_brief", "weekly_brief", "muted"]
 StateT = Literal["new", "read", "acted", "escalated", "suppressed"]
 
 _VALID_TRANSITIONS: dict[str, set[str]] = {
-    "new": {"read", "escalated", "suppressed"},
+    "new": {"read", "acted", "escalated", "suppressed"},
     "read": {"acted", "escalated", "suppressed"},
     "acted": set(),
     "escalated": set(),

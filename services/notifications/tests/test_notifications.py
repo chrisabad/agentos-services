@@ -166,10 +166,12 @@ def test_state_read_to_acted(client):
     assert r.json()["state"] == "acted"
 
 
-def test_state_invalid_transition_new_to_acted(client):
+def test_state_new_to_acted(client):
+    """new → acted is now valid (allows inbox-sweep to directly act on immediate notifications)."""
     notif_id = client.post("/notifications", json=_NOTIF).json()["id"]
     r = client.patch(f"/notifications/{notif_id}", json={"state": "acted"})
-    assert r.status_code == 422
+    assert r.status_code == 200
+    assert r.json()["state"] == "acted"
 
 
 def test_state_terminal_cannot_transition(client):
