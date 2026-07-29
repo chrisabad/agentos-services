@@ -27,7 +27,7 @@ const { Buffer } = require('buffer');
 const LS_API_BASE = 'https://api.lemonsqueezy.com/v1';
 const AMPLITUDE_EXPORT_BASE = 'https://amplitude.com/api/2';
 const AMPLITUDE_DASHBOARD_BASE = 'https://amplitude.com/api';
-const PLAIN_API_BASE = 'https://api.plain.com/graphql';
+const PLAIN_API_BASE = 'https://core-api.uk.plain.com/graphql/v1';
 
 const LS_API_KEY = process.env.LEMONSQUEEZY_API_KEY || '';
 const AMPLITUDE_API_KEY = process.env.AMPLITUDE_API_KEY || '';
@@ -75,14 +75,18 @@ function post(url, body, headers = {}) {
 /**
  * Fetch a binary response as a Buffer. Used for Amplitude export zip.
  */
-function fetchBinary(url, options = {}) {
+function fetchBinary(url, options = {}, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
-    mod.get(url, options, (res) => {
+    const req = mod.get(url, options, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
       res.on('end', () => resolve(Buffer.concat(chunks)));
-    }).on('error', reject);
+    });
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('Request timed out after ' + timeoutMs + 'ms'));
+    });
+    req.on('error', reject);
   });
 }
 
@@ -155,6 +159,26 @@ async function fetchLSOrders() {
 //   5. Returns a summary with DAU per day and total active users in the window
 
 /**
+ * Parse an Amplitude export zip: extract entries, gunzip, count DAU per day.
+ * Returns an array of day-maps (each: { date: Set<user_id> }).
+ */
+async function parseAmplitudeZip(zipBuf) {
+  const entries = parseStoredZip(zipBuf);
+  const dayMaps = [];
+  for (const entry of entries) {
+    if (entry.error || !entry.buffer || entry.buffer.length === 0) continue;
+    let ndjsonBuf;
+    try {
+      ndjsonBuf = zlib.gunzipSync(entry.buffer);
+    } catch {
+      ndjsonBuf = entry.buffer; // not gzipped
+    }
+    dayMaps.push(countDAUFromNDJSON(ndjsonBuf));
+  }
+  return dayMaps;
+}
+
+/**
  * Parse a stored (no-compression) zip buffer into an array of {name, buffer} entries.
  * Amplitude's export zip uses the 'store' method (0), so we don't need a full
  * inflate — just walk the local file headers.
@@ -178,14 +202,32 @@ function parseStoredZip(buf) {
 
     const name = buf.slice(offset + 30, offset + 30 + nameLen).toString('utf-8');
     const dataStart = offset + 30 + nameLen + extraLen;
+    let dataEnd;
+    let ddIdx = -1;
+    if (compressedSize > 0) {
+      dataEnd = dataStart + compressedSize;
+    } else {
+      // Streaming zip: local header has 0 for sizes.
+      // Check for data descriptor (PK\7\8) first, then next local header, then end.
+      const ddSig = Buffer.from([0x50, 0x4b, 0x07, 0x08]);
+      ddIdx = buf.indexOf(ddSig, dataStart);
+      if (ddIdx >= 0 && ddIdx < dataStart + 100000) {
+        dataEnd = ddIdx;
+      } else {
+        const lhSig = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+        const nextIdx = buf.indexOf(lhSig, dataStart + 1);
+        dataEnd = nextIdx >= 0 ? nextIdx : buf.length;
+      }
+    }
 
     if (compression === 0) {
       // Stored (no compression at zip level)
-      entries.push({ name, buffer: buf.slice(dataStart, dataStart + uncompressedSize) });
+      entries.push({ name, buffer: buf.slice(dataStart, dataEnd) });
     } else if (compression === 8) {
       // Deflated — shouldn't happen for Amplitude but handle gracefully
       try {
-        const inflated = zlib.inflateRawSync(buf.slice(dataStart, dataStart + compressedSize));
+        const dataLen = compressedSize > 0 ? compressedSize : (dataEnd - dataStart);
+        const inflated = zlib.inflateRawSync(buf.slice(dataStart, dataStart + dataLen));
         entries.push({ name, buffer: inflated });
       } catch (e) {
         entries.push({ name, buffer: null, error: 'inflate failed: ' + e.message });
@@ -194,7 +236,7 @@ function parseStoredZip(buf) {
       entries.push({ name, buffer: null, error: 'unsupported compression method: ' + compression });
     }
 
-    offset = dataStart + compressedSize;
+    offset = dataEnd + (dataEnd === ddIdx ? 16 : 0);
   }
 
   return entries;
@@ -219,7 +261,15 @@ function countDAUFromNDJSON(buf) {
       const ts = evt.time || evt.event_time;
       if (!ts) continue;
 
-      const date = new Date(typeof ts === 'number' ? ts : parseInt(ts, 10)).toISOString().slice(0, 10);
+      let date;
+      if (typeof ts === 'number') {
+        date = new Date(ts).toISOString().slice(0, 10);
+      } else if (typeof ts === 'string' && ts.match(/^\d{4}-\d{2}-\d{2}/)) {
+        date = ts.slice(0, 10);
+      } else {
+        const n = parseInt(ts, 10);
+        date = new Date(isNaN(n) ? ts : n).toISOString().slice(0, 10);
+      }
       if (!byDay[date]) byDay[date] = new Set();
       byDay[date].add(String(userId));
     } catch {
@@ -230,7 +280,7 @@ function countDAUFromNDJSON(buf) {
   return byDay;
 }
 
-async function fetchAmplitudeEvents(daysBack = 90) {
+async function fetchAmplitudeEvents(daysBack = 7) {
   if (!AMPLITUDE_API_KEY || !AMPLITUDE_SECRET_KEY) return { error: 'AMPLITUDE_API_KEY or AMPLITUDE_SECRET_KEY not set' };
 
   const auth = Buffer.from(AMPLITUDE_API_KEY + ':' + AMPLITUDE_SECRET_KEY).toString('base64');
@@ -245,7 +295,7 @@ async function fetchAmplitudeEvents(daysBack = 90) {
     return { error: 'Amplitude credential check returned an unexpected (non-JSON) response' };
   }
 
-  // Step 2: Fetch export zip
+  // Step 2: Fetch export zip — day-by-day to avoid timeouts
   const now = new Date();
   const end = new Date(now.getTime() + 86400000); // +1 day for timezone safety
   const start = new Date(now.getTime() - daysBack * 86400000);
@@ -258,66 +308,43 @@ async function fetchAmplitudeEvents(daysBack = 90) {
     return y + m + day + 'T' + h;
   };
 
-  const exportUrl = AMPLITUDE_EXPORT_BASE + '/export?start=' + fmt(start) + '&end=' + fmt(end);
-
-  let zipBuf;
-  try {
-    zipBuf = await fetchBinary(exportUrl, { headers: authHeader });
-  } catch (err) {
-    return { error: 'Amplitude export fetch failed: ' + err.message };
-  }
-
-  if (!zipBuf || zipBuf.length < 4) {
-    return { error: 'Amplitude export returned empty response' };
-  }
-
-  // Check if it's actually a zip (PK\x03\x04 signature)
-  if (zipBuf.readUInt32LE(0) !== 0x04034b50) {
-    // Might be an error response as JSON
+  // Fetch day-by-day to avoid timeouts on large windows
+  const allEvents = [];
+  const dayStart = new Date(start);
+  while (dayStart < end) {
+    const dayEnd = new Date(dayStart.getTime() + 86400000);
+    const exportUrl = AMPLITUDE_EXPORT_BASE + '/export?start=' + fmt(dayStart) + '&end=' + fmt(dayEnd);
     try {
-      const text = zipBuf.toString('utf-8');
-      const json = JSON.parse(text);
-      return { error: 'Amplitude export returned error: ' + JSON.stringify(json) };
-    } catch {
-      return { error: 'Amplitude export returned non-zip, non-JSON response (' + zipBuf.length + ' bytes)' };
+      const zipBuf = await fetchBinary(exportUrl, { headers: authHeader }, 30000);
+      if (zipBuf && zipBuf.length >= 4 && zipBuf.readUInt32LE(0) === 0x04034b50) {
+        const events = await parseAmplitudeZip(zipBuf);
+        allEvents.push(...events);
+      }
+    } catch (err) {
+      // Skip this day if it fails — partial data is better than none
     }
+    dayStart.setTime(dayStart.getTime() + 86400000);
   }
 
-  // Step 3: Parse the zip
-  const entries = parseStoredZip(zipBuf);
-  if (entries.length === 0) {
-    return { error: 'Amplitude export zip contained no entries' };
+  if (allEvents.length === 0) {
+    return { error: 'Amplitude export returned no events across ' + daysBack + ' days' };
   }
 
-  // Step 4: Gunzip each entry and count DAU
+  // Merge all day-maps into one
   const allByDay = {};
   let totalEvents = 0;
+  let filesParsed = 0;
   let parseErrors = 0;
-
-  for (const entry of entries) {
-    if (entry.error) {
-      parseErrors++;
-      continue;
-    }
-    if (!entry.buffer || entry.buffer.length === 0) continue;
-
-    let ndjsonBuf;
-    try {
-      ndjsonBuf = zlib.gunzipSync(entry.buffer);
-    } catch {
-      // Some entries may not be gzipped (e.g. small ones)
-      ndjsonBuf = entry.buffer;
-    }
-
-    const dayMap = countDAUFromNDJSON(ndjsonBuf);
+  for (const dayMap of allEvents) {
     for (const [date, users] of Object.entries(dayMap)) {
       if (!allByDay[date]) allByDay[date] = new Set();
       for (const uid of users) allByDay[date].add(uid);
       totalEvents += users.size;
     }
+    filesParsed++;
   }
 
-  // Step 5: Build summary
+  // Build summary
   const sortedDates = Object.keys(allByDay).sort();
   const dauByDay = sortedDates.map(date => ({
     date,
@@ -356,7 +383,7 @@ async function fetchAmplitudeEvents(daysBack = 90) {
     dau7DayAvg: avgDAU7,
     dauByDay: dauByDay.slice(-30), // last 30 days
     daysInWindow: sortedDates.length,
-    filesParsed: entries.length,
+    filesParsed,
     parseErrors,
   };
 }
@@ -364,15 +391,103 @@ async function fetchAmplitudeEvents(daysBack = 90) {
 async function fetchPlainTimeline() {
   if (!PLAIN_API_KEY) return { error: 'PLAIN_API_KEY not set' };
 
-  const query = {
-    query: '{\n      customerTimeline(first: 50, orderBy: { field: createdAt, direction: DESC }) {\n        edges {\n          node {\n            id\n            createdAt\n            ... on CustomerTimelineEntryText {\n              text\n            }\n          }\n        }\n      }\n    }',
+  // Step 1: Fetch recent customers
+  const customersQuery = {
+    query: `{
+      customers(first: 20) {
+        edges {
+          node {
+            id
+            fullName
+            email { email }
+            status
+            createdAt { iso8601 }
+          }
+        }
+      }
+    }`,
   };
 
+  let customers;
   try {
-    return await post(PLAIN_API_BASE, query, { Authorization: 'Bearer ' + PLAIN_API_KEY });
+    customers = await post(PLAIN_API_BASE, customersQuery, { Authorization: 'Bearer ' + PLAIN_API_KEY });
   } catch (err) {
     return { error: 'Plain API unreachable: ' + err.message };
   }
+
+  if (!customers || customers.errors || !customers.data?.customers?.edges) {
+    return { error: 'Plain customers query failed: ' + JSON.stringify(customers?.errors || 'no data') };
+  }
+
+  const customerList = customers.data.customers.edges.map(e => e.node);
+  const activeCustomers = customerList.filter(c => c.status === 'ACTIVE');
+
+  // Step 2: Fetch timeline entries for each active customer (last 7 days)
+  const now = new Date();
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 86400000).toISOString();
+
+  const timelinePromises = activeCustomers.slice(0, 10).map(async (customer) => {
+    const tlQuery = {
+      query: `{
+        timelineEntries(customerId: "${customer.id}", first: 5) {
+          edges {
+            node {
+              id
+              timestamp { iso8601 }
+              entry {
+                __typename
+                ... on NoteEntry { noteText: text }
+                ... on ChatEntry { chatText: text }
+                ... on EmailEntry { subject }
+                ... on CustomerEventEntry { __typename }
+                ... on ThreadStatusTransitionedEntry { __typename }
+              }
+            }
+          }
+        }
+      }`,
+    };
+
+    try {
+      const result = await post(PLAIN_API_BASE, tlQuery, { Authorization: 'Bearer ' + PLAIN_API_KEY });
+      const entries = result?.data?.timelineEntries?.edges?.map(e => ({
+        id: e.node.id,
+        timestamp: e.node.timestamp?.iso8601,
+        type: e.node.entry?.__typename,
+        subject: e.node.entry?.subject || null,
+        text: e.node.entry?.noteText || e.node.entry?.chatText || null,
+      })) || [];
+      return { customer: customer.fullName, customerId: customer.id, email: customer.email?.email, entries };
+    } catch {
+      return { customer: customer.fullName, customerId: customer.id, email: customer.email?.email, entries: [], error: 'timeline fetch failed' };
+    }
+  });
+
+  const timelines = await Promise.all(timelinePromises);
+
+  // Step 3: Aggregate stats
+  const totalEntries = timelines.reduce((sum, t) => sum + t.entries.length, 0);
+  const entryTypes = {};
+  for (const t of timelines) {
+    for (const e of t.entries) {
+      entryTypes[e.type] = (entryTypes[e.type] || 0) + 1;
+    }
+  }
+
+  return {
+    status: 'available',
+    totalCustomers: customerList.length,
+    activeCustomers: activeCustomers.length,
+    customersWithActivity: timelines.filter(t => t.entries.length > 0).length,
+    totalRecentEntries: totalEntries,
+    entryTypeBreakdown: entryTypes,
+    recentActivity: timelines.filter(t => t.entries.length > 0).slice(0, 5).map(t => ({
+      customer: t.customer,
+      email: t.email,
+      recentEntryCount: t.entries.length,
+      latestEntry: t.entries[0] || null,
+    })),
+  };
 }
 
 // ── Analysis ─────────────────────────────────────────────────────────────────────
@@ -579,29 +694,122 @@ function forecastMRR(subAnalysis, orderAnalysis) {
 // ── Recommendations ──────────────────────────────────────────────────────────────
 function generateRecommendations(subAnalysis, orderAnalysis, alerts) {
   const recs = [];
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const yesterdayStr = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+
+  // 1. Churn — name the specific plan or cohort
+  const churnByPlan = subAnalysis.byPlan || [];
+  const highestChurnPlan = churnByPlan
+    .filter(p => p.cancelled > 0 && p.active > 0)
+    .sort((a, b) => (b.cancelled / (b.active + b.cancelled)) - (a.cancelled / (a.active + a.cancelled)))[0];
 
   if (subAnalysis.churnRate > 5) {
-    recs.push({ priority: 'high', action: 'Investigate churn drivers', detail: 'Current churn rate is ' + subAnalysis.churnRate + '%. Review cancellation reasons and identify at-risk cohorts.' });
-  }
-  if (orderAnalysis.today.paymentFailures > 0) {
-    recs.push({ priority: 'high', action: 'Review payment failures', detail: orderAnalysis.today.paymentFailures + ' payment failures today. Check billing system and notify affected customers.' });
-  }
-  if (subAnalysis.daily.today.new < subAnalysis.daily.lastWeek.new / 7 * 0.7) {
-    recs.push({ priority: 'medium', action: 'New subscriptions below trend', detail: 'New subscriptions today (' + subAnalysis.daily.today.new + ') are significantly below the weekly daily average.' });
-  }
-  if (subAnalysis.mrr > 0 && subAnalysis.daily.lastMonth.new > subAnalysis.daily.lastMonth.cancelled) {
-    recs.push({ priority: 'medium', action: 'Net subscriber growth', detail: 'Net positive growth this month: ' + (subAnalysis.daily.lastMonth.new - subAnalysis.daily.lastMonth.cancelled) + ' more new than cancelled subscriptions.' });
-  }
-  if (orderAnalysis.yesterday.revenue > 0 && orderAnalysis.yesterday.revenue > orderAnalysis.dayBefore.revenue * 1.1) {
-    recs.push({ priority: 'low', action: 'Revenue up day-over-day', detail: 'Yesterday\'s revenue ($' + orderAnalysis.yesterday.revenue.toFixed(2) + ') was up vs day-before ($' + orderAnalysis.dayBefore.revenue.toFixed(2) + '). Identify what drove the increase.' });
-  }
-  if (alerts.length === 0) {
-    recs.push({ priority: 'low', action: 'No action required', detail: 'All metrics within normal thresholds. Continue monitoring.' });
+    const planDetail = highestChurnPlan
+      ? ` Plan "${highestChurnPlan.name}" has ${highestChurnPlan.cancelled} cancellations vs ${highestChurnPlan.active} active (${(highestChurnPlan.cancelled / (highestChurnPlan.active + highestChurnPlan.cancelled) * 100).toFixed(1)}% churn rate).`
+      : '';
+    recs.push({
+      priority: 'high',
+      action: `Churn at ${subAnalysis.churnRate}% — audit ${highestChurnPlan ? highestChurnPlan.name + ' plan' : 'cancellation reasons'}`,
+      detail: `Overall churn rate is ${subAnalysis.churnRate}%.${planDetail} Pull the last 5 cancellation reasons from Plain and check if there's a common theme (pricing, missing feature, onboarding). If pricing-driven, consider a win-back offer or usage-based downgrade path.`
+    });
+  } else if (subAnalysis.churnRate > 3) {
+    recs.push({
+      priority: 'medium',
+      action: `Churn at ${subAnalysis.churnRate}% — watch ${highestChurnPlan ? highestChurnPlan.name : 'top churn plan'}`,
+      detail: `Churn is ${subAnalysis.churnRate}% — not critical but above healthy. ${highestChurnPlan ? `Plan "${highestChurnPlan.name}" has ${highestChurnPlan.cancelled} cancellations.` : ''} Set a weekly check on cancellation reasons. If it hits 5%, escalate to a retention campaign.`
+    });
   }
 
-  // Always return exactly 3
+  // 2. New subscriptions — specific action, not "consider promotional push"
+  const weeklyAvg = subAnalysis.daily.lastWeek.new / 7;
+  const todayNew = subAnalysis.daily.today.new;
+  if (todayNew < weeklyAvg * 0.7 && weeklyAvg > 0) {
+    recs.push({
+      priority: 'medium',
+      action: `New subs today (${todayNew}) are ${weeklyAvg > 0 ? ((1 - todayNew / weeklyAvg) * 100).toFixed(0) : 0}% below weekly avg (${weeklyAvg.toFixed(1)}/day)`,
+      detail: `Today's ${todayNew} new subscriptions is well below the 7-day daily average of ${weeklyAvg.toFixed(1)}. Check: (1) Is the Figma listing still live? (2) Did a promo code expire? (3) Any recent pricing page changes? If nothing changed externally, this may be normal weekend/weekday variance — compare to same day last week.`
+    });
+  }
+
+  // 3. Payment failures — name the dollar amount at risk
+  if (orderAnalysis.today.paymentFailures > 0) {
+    const failedAmount = orderAnalysis.today.paymentFailures * (subAnalysis.mrr / subAnalysis.active);
+    recs.push({
+      priority: 'high',
+      action: `${orderAnalysis.today.paymentFailures} payment failure(s) today — ~$${failedAmount.toFixed(0)} MRR at risk`,
+      detail: `${orderAnalysis.today.paymentFailures} payment(s) failed today. Each failed payment risks churn. Action: (1) Check if it's a specific card processor issue. (2) LemonSqueezy auto-retries — verify retry schedule. (3) If same customer has >2 failures, reach out proactively with an updated payment link.`
+    });
+  }
+
+  // 4. Net growth — specific number and what to do
+  const netMonth = subAnalysis.daily.lastMonth.new - subAnalysis.daily.lastMonth.cancelled;
+  if (netMonth > 5) {
+    recs.push({
+      priority: 'low',
+      action: `Net +${netMonth} subscribers this month — double down on what's working`,
+      detail: `You added ${subAnalysis.daily.lastMonth.new} new and lost ${subAnalysis.daily.lastMonth.cancelled} cancelled this month (net +${netMonth}). Check which acquisition channel drove the most new subs in the last 30 days. If it's organic (Figma listing), consider a featured listing request. If it's referral, run a "refer a friend" campaign.`
+    });
+  } else if (netMonth < -5) {
+    recs.push({
+      priority: 'high',
+      action: `Net -${Math.abs(netMonth)} subscribers this month — urgent retention review`,
+      detail: `You're losing ${Math.abs(netMonth)} more subscribers than you're gaining this month. Immediate actions: (1) Review the last 10 cancellations in Plain for common themes. (2) Check if a competitor launched or pricing changed. (3) Consider a 30-day retention email sequence for at-risk users.`
+    });
+  }
+
+  // 5. Revenue day-over-day — specific dollar amounts
+  if (orderAnalysis.yesterday.revenue > 0 && orderAnalysis.dayBefore.revenue > 0) {
+    const change = ((orderAnalysis.yesterday.revenue - orderAnalysis.dayBefore.revenue) / orderAnalysis.dayBefore.revenue * 100);
+    const absChange = Math.abs(change);
+    if (absChange > 10) {
+      const direction = change > 0 ? 'up' : 'down';
+      const severity = change > 0 ? 'low' : 'medium';
+      recs.push({
+        priority: severity,
+        action: `Revenue ${direction} ${absChange.toFixed(1)}% day-over-day ($${orderAnalysis.yesterday.revenue.toFixed(2)} vs $${orderAnalysis.dayBefore.revenue.toFixed(2)})`,
+        detail: change > 0
+          ? `Yesterday's revenue ($${orderAnalysis.yesterday.revenue.toFixed(2)}) was ${absChange.toFixed(1)}% above the day before. Check if this was a one-off (annual plan upgrade, bulk purchase) or a genuine trend shift. If a trend, identify the source and consider increasing that channel's budget.`
+          : `Yesterday's revenue ($${orderAnalysis.yesterday.revenue.toFixed(2)}) dropped ${absChange.toFixed(1)}% from the day before ($${orderAnalysis.dayBefore.revenue.toFixed(2)}). Check: (1) Any failed payments yesterday? (2) Weekend effect? (3) Refund or chargeback? If no clear cause, monitor for 48h before acting.`
+      });
+    }
+  }
+
+  // 6. MRR health — specific dollar impact
+  if (subAnalysis.mrr > 0 && subAnalysis.active > 0) {
+    const avgRevenuePerSub = subAnalysis.mrr / subAnalysis.active;
+    const mrrFromNew = subAnalysis.daily.lastMonth.new * avgRevenuePerSub;
+    const mrrLost = subAnalysis.daily.lastMonth.cancelled * avgRevenuePerSub;
+    const mrrChange = mrrFromNew - mrrLost;
+    if (Math.abs(mrrChange) > 50) {
+      const direction = mrrChange > 0 ? 'gaining' : 'losing';
+      recs.push({
+        priority: mrrChange > 0 ? 'medium' : 'high',
+        action: `MRR ${direction} ~$${Math.abs(mrrChange).toFixed(0)}/mo this month (new: +$${mrrFromNew.toFixed(0)}, churn: -$${mrrLost.toFixed(0)})`,
+        detail: mrrChange > 0
+          ? `New subscriptions this month add ~$${mrrFromNew.toFixed(0)} MRR while churn costs ~$${mrrLost.toFixed(0)}. Net +$${mrrChange.toFixed(0)}. To accelerate: (1) Push the plan with the highest conversion rate. (2) Reduce churn by ${(subAnalysis.daily.lastMonth.cancelled * 0.2).toFixed(0)} subs (20% reduction) to add ~$${(subAnalysis.daily.lastMonth.cancelled * 0.2 * avgRevenuePerSub).toFixed(0)} more MRR.`
+          : `Churn is costing ~$${mrrLost.toFixed(0)} MRR this month vs ~$${mrrFromNew.toFixed(0)} from new subs. Net -$${Math.abs(mrrChange).toFixed(0)}. To reverse: (1) Reduce churn by just ${(subAnalysis.daily.lastMonth.cancelled * 0.3).toFixed(0)} subs (30% reduction) to save ~$${(subAnalysis.daily.lastMonth.cancelled * 0.3 * avgRevenuePerSub).toFixed(0)} MRR. (2) Increase new subs by ${(subAnalysis.daily.lastMonth.new * 0.2).toFixed(0)} (20% lift) to add ~$${(subAnalysis.daily.lastMonth.new * 0.2 * avgRevenuePerSub).toFixed(0)} MRR.`
+      });
+    }
+  }
+
+  // 7. Fallback — never "no action required"
+  if (recs.length === 0) {
+    recs.push({
+      priority: 'low',
+      action: 'All metrics stable — focus on growth levers',
+      detail: `MRR is $${subAnalysis.mrr.toFixed(2)} with ${subAnalysis.active} active subs and ${subAnalysis.churnRate}% churn. No anomalies detected. Recommended focus: (1) Review the top 3 performing plans and consider a limited-time offer. (2) Check Plain for any unresolved support threads that could become churn risks. (3) Verify the Figma listing is up to date.`
+    });
+  }
+
+  // Always return exactly 3, never filler
   while (recs.length < 3) {
-    recs.push({ priority: 'low', action: 'Monitor trends', detail: 'No specific action needed. Continue monitoring key metrics.' });
+    const avgRevenuePerSub = subAnalysis.active > 0 ? subAnalysis.mrr / subAnalysis.active : 0;
+    recs.push({
+      priority: 'low',
+      action: `Maintain momentum — ${subAnalysis.active} active subs at $${subAnalysis.mrr.toFixed(2)} MRR`,
+      detail: `Current run rate: $${subAnalysis.mrr.toFixed(2)} MRR from ${subAnalysis.active} subs (avg $${avgRevenuePerSub.toFixed(2)}/sub). To grow MRR by 10%, add ${Math.ceil(subAnalysis.mrr * 0.1 / avgRevenuePerSub)} new subs or reduce churn by ${Math.ceil(subAnalysis.active * 0.02)} subs. Recommended: A/B test the pricing page CTA this week.`
+    });
   }
 
   return recs.slice(0, 3);
@@ -845,7 +1053,7 @@ async function main() {
     fetchLSSubscriptions(),
     fetchLSOrders(),
     fetchLSPrices(),
-    fetchAmplitudeEvents(90),
+    fetchAmplitudeEvents(7),
     fetchPlainTimeline(),
   ]);
 
