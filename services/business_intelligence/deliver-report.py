@@ -141,8 +141,8 @@ lines.append(f"  Amplitude:        {report['metrics']['amplitude']['status']}")
 if "error" in report["metrics"]["amplitude"]:
     lines.append(f"    Error: {report['metrics']['amplitude']['error']}")
 lines.append(f"  Plain:            {report['metrics']['plain']['status']}")
-if "error" in report["metrics"]["plain"] or (plain.get("data",{}).get("error")):
-    lines.append(f"    Error: {report['metrics']['plain'].get('error') or plain['data'].get('error')}")
+if "error" in report["metrics"]["plain"] or (report["metrics"]["plain"].get("data",{}).get("error")):
+    lines.append(f"    Error: {report['metrics']['plain'].get('error') or report['metrics']['plain']['data'].get('error')}")
 lines.append("")
 lines.append("=" * 60)
 lines.append(f"  Generated: {report['generatedAt']}")
