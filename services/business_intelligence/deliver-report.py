@@ -141,8 +141,8 @@ lines.append(f"  Amplitude:        {report['metrics']['amplitude']['status']}")
 if "error" in report["metrics"]["amplitude"]:
     lines.append(f"    Error: {report['metrics']['amplitude']['error']}")
 lines.append(f"  Plain:            {report['metrics']['plain']['status']}")
-if "error" in report["metrics"]["plain"]:
-    lines.append(f"    Error: {report['metrics']['plain']['error']}")
+if "error" in report["metrics"]["plain"] or (report["metrics"]["plain"].get("data",{}).get("error")):
+    lines.append(f"    Error: {report['metrics']['plain'].get('error') or report['metrics']['plain']['data'].get('error')}")
 lines.append("")
 lines.append("=" * 60)
 lines.append(f"  Generated: {report['generatedAt']}")
@@ -239,24 +239,29 @@ if amp.get("status") == "available" and amp.get("data"):
 
 # ── Plain Customer Timeline ──
 plain = report["metrics"]["plain"]
-plain_data = plain.get("data", {})
-plain_graphql = plain_data.get("data", {}) if isinstance(plain_data, dict) else {}
-plain_timeline = plain_graphql.get("customerTimeline", {}) if isinstance(plain_graphql, dict) else {}
-plain_edges = plain_timeline.get("edges", []) if isinstance(plain_timeline, dict) else []
-if plain and plain.get("status") == "available" and isinstance(plain_data, dict) and "data" in plain_data and plain_edges:
-    if plain_edges:
-        timeline_lines = []
-        for e in plain_edges[:5]:
-            node = e.get("node", {})
-            date = (node.get("createdAt", "") or "")[:10]
-            text = node.get("text", "") or ""
-            if len(text) > 120:
-                text = text[:120] + "..."
-            timeline_lines.append(f"`{date}` {text}")
+plain_data = plain.get("data", {}) if plain.get("status") == "available" else {}
+if plain_data and plain_data.get("recentActivity"):
+    timeline_lines = []
+    for act in plain_data["recentActivity"][:5]:
+        name = act.get("customer", "Unknown")
+        count = act.get("recentEntryCount", 0)
+        latest = act.get("latestEntry", {})
+        ts = (latest.get("timestamp", "") or "")[:10]
+        entry_type = (latest.get("type", "") or "").replace("Entry", "")
+        subject = latest.get("subject", "") or ""
+        detail = subject or entry_type
+        timeline_lines.append(f"• *{name}* — {count} entries, latest: {ts} ({detail})")
+    if timeline_lines:
         slack_payload["blocks"].append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "*Customer Timeline (Plain)*\n" + "\n".join(timeline_lines)}
+            "text": {"type": "mrkdwn", "text": "*Customer Activity (Plain)*\n" + "\n".join(timeline_lines)}
         })
+    # Add summary stats
+    summary_line = f"_{plain_data['totalCustomers']} total customers, {plain_data['activeCustomers']} active, {plain_data['customersWithActivity']} with recent activity_"
+    slack_payload["blocks"].append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": summary_line}]
+    })
 
 # Add alerts
 if alerts:
