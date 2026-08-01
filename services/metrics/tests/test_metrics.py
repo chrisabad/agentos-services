@@ -123,6 +123,19 @@ def test_fon_has_two_rails_and_anchor():
     assert b.ls_store_id == 98077 and b.ls_product_id == 304388
 
 
+def test_dia_registered_with_xero_rail():
+    b = get_business("dia")
+    assert [r.key for r in b.rails] == ["xero_pnl"]
+    assert b.entity_id == "DIA"
+
+
+def test_dia_entity_config_loads():
+    from services.bookkeeping.config import load_config
+    cfg = load_config("DIA")
+    assert cfg.xero_tenant_id == "6f7f5a52-154c-4159-b140-659fafeefd7a"
+    assert cfg.xero_org_prefix == "diacritic_mining"
+
+
 def test_unknown_business():
     with pytest.raises(KeyError):
         get_business("wee")

@@ -22,10 +22,11 @@ from typing import Dict, Optional
 class Entity:
     KAL = "KAL"  # Kaleidoscope — Xero
     FON = "FON"  # Font Replacer  — Xero
+    DIA = "DIA"  # Diacritic Mining — Xero
     PER = "PER"  # Personal       — Monarch Money
 
 
-ALL_ENTITIES = [Entity.KAL, Entity.FON, Entity.PER]
+ALL_ENTITIES = [Entity.KAL, Entity.FON, Entity.DIA, Entity.PER]
 
 # ---------------------------------------------------------------------------
 # Chart of accounts (canonical codes per entity)
@@ -60,6 +61,18 @@ FON_CHART: Dict[str, str] = {
     "429": "General Expenses",
 }
 
+# Diacritic Mining — Xero Diacritic Mining org
+# Minimal chart; mining income + hosting costs dominate. Extend as the
+# categorizer meets real transactions.
+DIA_CHART: Dict[str, str] = {
+    "200": "Sales",
+    "260": "Other Revenue",
+    "404": "Bank Fees",
+    "429": "General Expenses",
+    "445": "Office Expenses",
+    "461": "Software",
+}
+
 # Personal — Monarch Money categories (by ID)
 PER_CATEGORIES: Dict[str, str] = {
     "212422101593280401": "Salary & Wages",
@@ -83,6 +96,7 @@ PER_CATEGORIES: Dict[str, str] = {
 XERO_TENANTS = {
     Entity.KAL: "9407f6f4-eb25-4740-b9c0-e47bef745954",
     Entity.FON: "81156553-6158-48ae-9481-ac7b52ff766c",
+    Entity.DIA: "6f7f5a52-154c-4159-b140-659fafeefd7a",
 }
 
 # Zapier connection ID for Xero (verified 2026-07-15)
@@ -156,6 +170,22 @@ DEFAULT_CONFIGS = {
         materiality_threshold=100.0,
         chart=FON_CHART,
         rules_path="/paperclip/repos/agentos-services/services/bookkeeping/rules/fon.rules",
+    ),
+    Entity.DIA: EntityConfig(
+        entity_id=Entity.DIA,
+        name="Diacritic Mining",
+        source_type="xero",
+        xero_tenant_id=XERO_TENANTS[Entity.DIA],
+        xero_org_prefix="diacritic_mining",
+        # Thresholds from the xero-accounting monthly-close criteria:
+        # revenue < $100/mo suggests a mining outage; net loss > $200 needs
+        # a hosting-cost-vs-revenue check.
+        net_loss_flag=-200.0,
+        unreconciled_flag_count=5,
+        single_txn_flag=100.0,
+        materiality_threshold=100.0,
+        chart=DIA_CHART,
+        rules_path="/paperclip/repos/agentos-services/services/bookkeeping/rules/dia.rules",
     ),
     Entity.PER: EntityConfig(
         entity_id=Entity.PER,
