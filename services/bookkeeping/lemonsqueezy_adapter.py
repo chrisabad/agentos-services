@@ -44,6 +44,32 @@ class LSData:
     revenue: Optional[LSMonthlyRevenue] = None
 
 
+@dataclass
+class LSRevenue:
+    """LS gross revenue for a period, renewals INCLUDED.
+
+    ``/v1/orders`` contains only initial purchases; subscription renewals
+    bill through ``/v1/subscription-invoices`` (``billing_reason="renewal"``)
+    and are ~33% of Font Replacer lifetime revenue as of 2026-07 (and
+    growing as annual cohorts renew). Any "revenue" number derived from
+    orders alone silently undercounts — the AGE-2787 report bug class.
+    Verified reconciliation 2026-07-30: orders $13,908.33 + renewals
+    $6,875.73 ≈ store-reported lifetime $20,760.21.
+    """
+    period_start: date
+    period_end: date
+    order_count: int = 0
+    order_cents: int = 0        # paid initial purchases (orders endpoint)
+    renewal_count: int = 0
+    renewal_cents: int = 0      # paid renewal invoices
+    refunded_order_count: int = 0
+    refunded_order_cents: int = 0
+
+    @property
+    def gross_cents(self) -> int:
+        return self.order_cents + self.renewal_cents
+
+
 # ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
@@ -85,8 +111,12 @@ class LemonSqueezyAdapter:
         query_parts = [f"{k}={v}" for k, v in params.items()]
         url = f"{LEMONSQUEEZY_API_URL}{path}?{'&'.join(query_parts)}"
 
+        # -g (--globoff) is REQUIRED: LS query params use literal brackets
+        # (page[size], filter[store_id]); without it curl treats them as a
+        # glob range and dies with exit 3 ("bad range in URL") before any
+        # request is sent — the exact silent-failure class from AGE-2787.
         result = subprocess.run(
-            ["curl", "-s", url,
+            ["curl", "-sg", url,
              "-H", f"Authorization: Bearer {self.api_key}",
              "-H", "Accept: application/vnd.api+json"],
             capture_output=True,
@@ -187,6 +217,65 @@ class LemonSqueezyAdapter:
             return [s for s in all_subs if s.get("attributes", {}).get("status") == status_filter]
         return all_subs
 
+    def pull_subscription_invoices(
+        self,
+        start: date,
+        end: date,
+        billing_reason: Optional[str] = "renewal",
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch paid subscription invoices in the date range.
+
+        ``billing_reason="renewal"`` (the default) returns only renewal
+        billings — the correct set to ADD to orders when computing revenue,
+        because ``billing_reason="initial"`` invoices duplicate the order
+        rows. Pass ``billing_reason=None`` for all paid invoices.
+        """
+        params: Dict[str, str] = {
+            "filter[store_id]": str(self.store_id),
+        }
+        invoices = self._paginate("/subscription-invoices", params)
+
+        start_str = start.isoformat()
+        end_str = end.isoformat()
+        out: List[Dict[str, Any]] = []
+        for inv in invoices:
+            attrs = inv.get("attributes", {})
+            if attrs.get("status") != "paid":
+                continue
+            if billing_reason and attrs.get("billing_reason") != billing_reason:
+                continue
+            created = attrs.get("created_at", "")[:10]
+            if start_str <= created <= end_str:
+                out.append(inv)
+        return out
+
+    def compute_revenue(self, start: date, end: date) -> LSRevenue:
+        """
+        Gross customer-payment revenue for a period: paid orders PLUS paid
+        renewal invoices. This is the method to use for any "revenue for
+        period X" question; ``compute_monthly_revenue`` below is orders-only
+        and kept for backward compatibility.
+        """
+        rev = LSRevenue(period_start=start, period_end=end)
+
+        for o in self.pull_orders(start, end):
+            attrs = o.get("attributes", {})
+            rev.order_count += 1
+            rev.order_cents += int(attrs.get("total_usd", attrs.get("total", 0)))
+            if attrs.get("refunded", False):
+                rev.refunded_order_count += 1
+                rev.refunded_order_cents += int(
+                    attrs.get("refunded_amount_usd", attrs.get("refunded_amount", 0)) or 0
+                )
+
+        for inv in self.pull_subscription_invoices(start, end, billing_reason="renewal"):
+            attrs = inv.get("attributes", {})
+            rev.renewal_count += 1
+            rev.renewal_cents += int(attrs.get("total_usd", attrs.get("total", 0)))
+
+        return rev
+
     def compute_monthly_revenue(
         self,
         period_start: date,
@@ -195,6 +284,11 @@ class LemonSqueezyAdapter:
     ) -> LSMonthlyRevenue:
         """
         Compute total LS revenue for a specific month.
+
+        WARNING (AGE-2787): orders-only — EXCLUDES subscription renewals,
+        which bill via /v1/subscription-invoices. Use ``compute_revenue``
+        for any true revenue figure; this method remains for the legacy
+        monthly-close comparison path only.
 
         Args:
             period_start: First day of period

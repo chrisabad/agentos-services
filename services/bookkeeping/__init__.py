@@ -17,22 +17,29 @@ from .invariants import (
     check_category_totals,
     run_all_invariants,
 )
-from .pipeline import (
-    PipelineResult,
-    RunReport,
-    run_bookkeeping_pipeline,
-    write_run_log,
-    get_run_logs,
-    get_run_log,
-)
-from .categorizer import (
-    CategorizationInput,
-    CategorizationPipeline,
-    CategorizationReport,
-    CategorizationResult,
-    RuleBasedCategorizer,
-    ModelCategorizer,
-)
+# The pipeline/categorizer stack needs optional heavy deps (httpx for the
+# model categorizer). Lightweight consumers — e.g. `services.metrics`, which
+# agents run with bare python for revenue questions — only need config +
+# adapters, so degrade gracefully instead of failing the whole package import.
+try:
+    from .pipeline import (
+        PipelineResult,
+        RunReport,
+        run_bookkeeping_pipeline,
+        write_run_log,
+        get_run_logs,
+        get_run_log,
+    )
+    from .categorizer import (
+        CategorizationInput,
+        CategorizationPipeline,
+        CategorizationReport,
+        CategorizationResult,
+        RuleBasedCategorizer,
+        ModelCategorizer,
+    )
+except ImportError:  # pragma: no cover — full pipeline unavailable without extras
+    pass
 
 __all__ = [
     "Entity", "EntityConfig", "load_config",
