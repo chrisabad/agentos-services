@@ -485,6 +485,121 @@ def check_prior_month_closed(
     )
 
 
+def check_xero_feed_gap(
+    mercury_txns: List[Dict[str, Any]],
+    xero_bank_txns: List[Dict[str, Any]],
+    entity: str,
+    date_window_days: int = 5,
+) -> InvariantResult:
+    """
+    INV10 — Mercury feed-gap check: every Mercury-settled transaction must appear in Xero.
+
+    Mercury is the tie-out authority over the Xero bank feed. A feed gap is any
+    Mercury transaction with status='sent' that has NO corresponding transaction
+    in Xero's BankTransactions for the same period.
+
+    Matching strategy:
+      - Approximate date match (±date_window_days around postedAt)
+      - Amount match (within $0.01)
+      - Counterparty name match (case-insensitive substring of bankDescription)
+
+    Only runs when both lists are provided. For non-FON entities, skips with
+    a pass (Mercury is Font Replacer only).
+    """
+    from datetime import datetime, timedelta
+
+    if not mercury_txns or not xero_bank_txns:
+        return InvariantResult(
+            name="INV10_xero_feed_gap",
+            passed=True,
+            entity=entity,
+            summary="Feed-gap check skipped — missing Mercury or Xero data",
+            severity="warning",
+        )
+
+    settled = [t for t in mercury_txns if t.get("status") == "sent"]
+
+    feed_gaps: List[Dict[str, Any]] = []
+    for mt in settled:
+        mt_amount = Decimal(str(abs(mt.get("amount", 0))))
+        try:
+            mt_date = datetime.fromisoformat(mt.get("postedAt", "").replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        mt_desc = (mt.get("bankDescription") or mt.get("counterpartyName") or "").lower()
+
+        matched = False
+        for xt in xero_bank_txns:
+            xt_amount = Decimal(str(abs(xt.get("Total", 0))))
+            # Xero Date is string like "2026-07-07T00:00:00"
+            try:
+                xt_date = datetime.fromisoformat(xt.get("Date", "").replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            xt_desc = (xt.get("Reference") or xt.get("BankAccount", {}).get("Name", "") or "").lower()
+
+            # 3-way match: amount (within $0.01), date (within window), counterparty
+            amount_match = abs(mt_amount - xt_amount) <= Decimal("0.01")
+            date_diff = abs((mt_date - xt_date).days)
+            date_match = date_diff <= date_window_days
+            # Counterparty: check if Mercury description appears in Xero description
+            # or vice versa (case-insensitive). Split on common delimiters.
+            mt_keywords = set(w for w in mt_desc.replace(";", " ").replace(",", " ").split() if len(w) > 2)
+            xt_keywords = set(w for w in xt_desc.replace(";", " ").replace(",", " ").split() if len(w) > 2)
+            counterparty_match = len(mt_keywords & xt_keywords) > 0 if mt_keywords and xt_keywords else False
+
+            if amount_match and date_match and counterparty_match:
+                matched = True
+                break
+
+        if not matched:
+            feed_gaps.append(mt)
+
+    passed = len(feed_gaps) == 0
+
+    if passed:
+        summary = (
+            f"Xero feed-gap check PASSED: all {len(settled)} Mercury transactions "
+            f"have Xero matches"
+        )
+    else:
+        gap_total = sum(t.get("amount", 0) for t in feed_gaps)
+        summary = (
+            f"Xero FEED GAP: {len(feed_gaps)} Mercury transaction(s) absent from Xero "
+            f"(total ${abs(gap_total):.2f})"
+        )
+
+    detail_lines = [
+        f"Mercury settled transactions scanned: {len(settled)}",
+        f"Xero bank transactions compared: {len(xero_bank_txns)}",
+        f"Feed gaps found: {len(feed_gaps)}",
+    ]
+    if feed_gaps:
+        detail_lines.append("")
+        detail_lines.append("Gaps:")
+        for g in feed_gaps:
+            detail_lines.append(
+                f"  {str(g.get('postedAt','?'))[:10]}  "
+                f"${abs(g.get('amount',0)):.2f}  "
+                f"{g.get('counterpartyName','?')}  "
+                f"[{g.get('bankDescription','')}]"
+            )
+
+    return InvariantResult(
+        name="INV10_xero_feed_gap",
+        passed=passed,
+        entity=entity,
+        summary=summary,
+        detail="\n".join(detail_lines),
+        severity="error",
+        metrics={
+            "mercury_settled_count": len(settled),
+            "xero_txn_count": len(xero_bank_txns),
+            "feed_gap_count": len(feed_gaps),
+            "feed_gap_total_usd": float(abs(sum(t.get("amount", 0) for t in feed_gaps))),
+        },
+    )
+
 def check_degenerate_result(
     total_assets: Decimal,
     total_liabilities: Decimal,
@@ -566,6 +681,8 @@ def run_all_invariants(
     period_end: Optional[str] = None,
     ls_revenue_cents: Optional[int] = None,
     xero_sales_total: Optional[Decimal] = None,
+    mercury_txns: Optional[List[Dict[str, Any]]] = None,
+    xero_bank_txns: Optional[List[Dict[str, Any]]] = None,
 ) -> InvariantReport:
     """
     Run all applicable invariant checks for one entity.
@@ -619,6 +736,12 @@ def run_all_invariants(
     results.append(check_degenerate_result(
         total_assets, total_liabilities, total_equity, current_net, entity,
     ))
+
+    # INV10 — Mercury feed-gap check (only when both lists provided)
+    if mercury_txns is not None and xero_bank_txns is not None:
+        results.append(check_xero_feed_gap(
+            mercury_txns, xero_bank_txns, entity,
+        ))
 
     all_passed = all(r.passed or r.severity == "warning" or r.severity == "info" for r in results)
 

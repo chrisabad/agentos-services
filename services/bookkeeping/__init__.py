@@ -15,6 +15,7 @@ from .invariants import (
     check_mom_delta,
     check_no_out_of_period,
     check_category_totals,
+    check_xero_feed_gap,
     run_all_invariants,
 )
 # The pipeline/categorizer stack needs optional heavy deps (httpx for the
@@ -49,6 +50,7 @@ __all__ = [
     "check_balance_sheet_balances", "check_bank_vs_ledger",
     "check_unreconciled_count", "check_mom_delta",
     "check_no_out_of_period", "check_category_totals",
+    "check_xero_feed_gap",
     "run_all_invariants",
     "PipelineResult", "RunReport", "run_bookkeeping_pipeline",
     "write_run_log", "get_run_logs", "get_run_log",
