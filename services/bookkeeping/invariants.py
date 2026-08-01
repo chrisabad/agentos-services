@@ -506,7 +506,7 @@ def check_xero_feed_gap(
     Only runs when both lists are provided. For non-FON entities, skips with
     a pass (Mercury is Font Replacer only).
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime
 
     if not mercury_txns or not xero_bank_txns:
         return InvariantResult(

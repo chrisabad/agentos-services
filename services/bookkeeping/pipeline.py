@@ -330,6 +330,36 @@ def _run_xero_entity(
     adapter = XeroAdapter(config)
     data = adapter.pull_all(start, end)
 
+    # Mercury feed-gap data (Font Replacer only)
+    mercury_txns: Optional[List[Dict[str, Any]]] = None
+    xero_raw_txns: Optional[List[Dict[str, Any]]] = None
+    if config.entity_id == "FON":
+        try:
+            from .mercury_adapter import MercuryAdapter
+            mercury = MercuryAdapter()
+            mercury_data = mercury.pull_all(start, end)
+            mercury_txns = mercury_data.transactions
+
+            # Get raw Xero BankTransactions (the BankTransaction objects have
+            # the fields INV10 needs: Total, Date, Reference, BankAccount)
+            xero_raw_txns = [
+                {
+                    "BankTransactionID": t.id,
+                    "Total": float(t.total),
+                    "Date": t.date.isoformat(),
+                    "Type": t.type,
+                    "Reference": t.reference,
+                    "IsReconciled": t.is_reconciled,
+                    "Contact": {"Name": t.contact_name} if t.contact_name else None,
+                    "BankAccount": {"Name": t.account_name} if t.account_name else None,
+                }
+                for t in data.transactions
+            ]
+        except Exception as e:
+            import logging
+            logging.warning(f"Mercury feed-gap check setup failed: {e}")
+    # END Mercury feed-gap block
+
     # ------------------------------------------------------------------
     # Categorization pipeline + judge-tier spot verification
     # ------------------------------------------------------------------
@@ -455,6 +485,8 @@ def _run_xero_entity(
         period_end=end.isoformat(),
         ls_revenue_cents=ls_revenue_cents,
         xero_sales_total=xero_sales_total,
+        mercury_txns=mercury_txns,
+        xero_bank_txns=xero_raw_txns,
     )
 
     # Flag transactions above materiality threshold
