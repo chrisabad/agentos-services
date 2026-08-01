@@ -71,8 +71,19 @@ REGISTRY = {
             ),
         ],
     ),
-    # Diacritic Mining has a Xero tenant (xero-accounting skill) but no
-    # bookkeeping EntityConfig yet — add it there first, then register here.
+    "dia": Business(
+        key="dia",
+        name="Diacritic Mining",
+        entity_id="DIA",
+        rails=[
+            Rail(
+                key="xero_pnl",
+                label="Xero P&L revenue (mining income)",
+                basis="net_payout",
+                notes="Cash-basis ledger revenue as recorded in Xero",
+            ),
+        ],
+    ),
 }
 
 
