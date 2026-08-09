@@ -19,6 +19,7 @@ from services.bookkeeping.invariants import (
     check_prior_month_closed,
     check_ls_xero_revenue,
     check_degenerate_result,
+    check_xero_feed_gap,
     run_all_invariants,
     InvariantReport,
 )
@@ -441,6 +442,200 @@ class TestRunAll:
         assert d["name"] == "INV01_balance_sheet_balances"
         assert d["passed"] is True
         assert d["entity"] == "KAL"
+
+
+# =====================================================================
+# INV10 — Mercury feed-gap check
+# =====================================================================
+
+
+class TestXeroFeedGap:
+    """INV10 — Mercury-settled transactions must appear in Xero bank feed."""
+
+    def test_feed_gap_all_matched(self):
+        """All Mercury sent txns have Xero matches → pass."""
+        result = check_xero_feed_gap(
+            mercury_txns=[
+                {
+                    "status": "sent",
+                    "amount": -500.00,  # $500.00
+                    "postedAt": "2026-07-15T10:00:00Z",
+                    "bankDescription": "Stripe payout Jul 15",
+                    "counterpartyName": "Stripe",
+                },
+            ],
+            xero_bank_txns=[
+                {
+                    "Total": 500.00,
+                    "Date": "2026-07-15T00:00:00",
+                    "Reference": "Stripe payout",
+                },
+            ],
+            entity="FON",
+        )
+        assert result.passed is True
+        assert "PASSED" in result.summary
+        assert result.severity == "error"
+
+    def test_feed_gap_missing_txn(self):
+        """Mercury txn absent from Xero → fail."""
+        result = check_xero_feed_gap(
+            mercury_txns=[
+                {
+                    "status": "sent",
+                    "amount": -500.00,
+                    "postedAt": "2026-07-15T10:00:00Z",
+                    "bankDescription": "Stripe payout Jul 15",
+                    "counterpartyName": "Stripe",
+                },
+            ],
+            xero_bank_txns=[
+                {
+                    "Total": 999.99,  # Different amount — no match
+                    "Date": "2026-07-15T00:00:00",
+                    "Reference": "Some other payment",
+                },
+            ],
+            entity="FON",
+        )
+        assert result.passed is False
+        assert "FEED GAP" in result.summary
+        assert result.severity == "error"
+
+    def test_feed_gap_empty_mercury(self):
+        """Empty Mercury list → skip (pass with warning)."""
+        result = check_xero_feed_gap(
+            mercury_txns=[],
+            xero_bank_txns=[{"Total": 500.00, "Date": "2026-07-15T00:00:00"}],
+            entity="FON",
+        )
+        assert result.passed is True
+        assert "skipped" in result.summary.lower()
+        assert result.severity == "warning"
+
+    def test_feed_gap_empty_xero(self):
+        """Empty Xero list → skip (pass with warning)."""
+        result = check_xero_feed_gap(
+            mercury_txns=[{"status": "sent", "amount": -500.00, "postedAt": "2026-07-15T10:00:00Z"}],
+            xero_bank_txns=[],
+            entity="FON",
+        )
+        assert result.passed is True
+        assert "skipped" in result.summary.lower()
+        assert result.severity == "warning"
+
+    def test_feed_gap_amount_mismatch(self):
+        """Amount differs by >$0.01 → no match → fail."""
+        result = check_xero_feed_gap(
+            mercury_txns=[
+                {
+                    "status": "sent",
+                    "amount": -500.00,  # $500.00
+                    "postedAt": "2026-07-15T10:00:00Z",
+                    "bankDescription": "Stripe payout",
+                    "counterpartyName": "Stripe",
+                },
+            ],
+            xero_bank_txns=[
+                {
+                    "Total": 510.00,  # $10 diff → no match
+                    "Date": "2026-07-15T00:00:00",
+                    "Reference": "Stripe payout",
+                },
+            ],
+            entity="FON",
+        )
+        assert result.passed is False
+        assert "FEED GAP" in result.summary
+
+    def test_feed_gap_date_outside_window(self):
+        """Date outside ±5 day window → no match → fail."""
+        result = check_xero_feed_gap(
+            mercury_txns=[
+                {
+                    "status": "sent",
+                    "amount": -500.00,
+                    "postedAt": "2026-07-15T10:00:00Z",
+                    "bankDescription": "Stripe payout",
+                    "counterpartyName": "Stripe",
+                },
+            ],
+            xero_bank_txns=[
+                {
+                    "Total": 500.00,
+                    "Date": "2026-07-01T00:00:00",  # 14 days off → outside 5-day window
+                    "Reference": "Stripe payout",
+                },
+            ],
+            entity="FON",
+        )
+        assert result.passed is False
+        assert "FEED GAP" in result.summary
+
+    def test_feed_gap_non_sent_ignored(self):
+        """Non-sent Mercury txns (pending, etc.) are ignored → pass."""
+        result = check_xero_feed_gap(
+            mercury_txns=[
+                {
+                    "status": "pending",  # Not 'sent' — should be ignored
+                    "amount": -500.00,
+                    "postedAt": "2026-07-15T10:00:00Z",
+                    "bankDescription": "Stripe payout",
+                    "counterpartyName": "Stripe",
+                },
+            ],
+            xero_bank_txns=[
+                {
+                    "Total": 500.00,
+                    "Date": "2026-07-15T00:00:00",
+                    "Reference": "Some payment",
+                },
+            ],
+            entity="FON",
+        )
+        assert result.passed is True
+        assert "PASSED" in result.summary
+
+    def test_feed_gap_in_run_all_invariants(self):
+        """INV10 is included in run_all_invariants when both lists provided."""
+        report = run_all_invariants(
+            entity="FON",
+            total_assets=Decimal("10000"),
+            total_liabilities=Decimal("4000"),
+            total_equity=Decimal("6000"),
+            unreconciled_count=2,
+            unreconciled_threshold=5,
+            current_net=Decimal("500"),
+            previous_net=Decimal("450"),
+            txn_dates=["2026-07-15"],
+            category_totals={"200": Decimal("5000")},
+            statement_totals={"200": Decimal("5000")},
+            balance_sheet_cash=Decimal("5000"),
+            bank_statement_balance=Decimal("5000"),
+            prior_month_summary="June close ok",
+            period_start="2026-07-01",
+            period_end="2026-07-31",
+            mercury_txns=[
+                {
+                    "status": "sent",
+                    "amount": -500.00,
+                    "postedAt": "2026-07-15T10:00:00Z",
+                    "bankDescription": "Stripe payout",
+                    "counterpartyName": "Stripe",
+                },
+            ],
+            xero_bank_txns=[
+                {
+                    "Total": 500.00,
+                    "Date": "2026-07-15T00:00:00",
+                    "Reference": "Stripe payout",
+                },
+            ],
+        )
+        assert report.all_passed is True
+        inv10 = [r for r in report.results if r.name == "INV10_xero_feed_gap"]
+        assert len(inv10) == 1
+        assert inv10[0].passed is True
 
 
 # =====================================================================
