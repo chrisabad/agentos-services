@@ -521,9 +521,12 @@ def check_xero_feed_gap(
 
     feed_gaps: List[Dict[str, Any]] = []
     for mt in settled:
-        mt_amount = Decimal(str(abs(mt.get("amount", 0))))
+        mt_amount = Decimal(str(abs(mt.get("amount", 0))))  # Mercury amounts are in dollars
         try:
             mt_date = datetime.fromisoformat(mt.get("postedAt", "").replace("Z", "+00:00"))
+            # Make offset-naive for comparison with Xero dates
+            if mt_date.tzinfo is not None:
+                mt_date = mt_date.replace(tzinfo=None)
         except (ValueError, TypeError):
             continue
         mt_desc = (mt.get("bankDescription") or mt.get("counterpartyName") or "").lower()
@@ -536,7 +539,14 @@ def check_xero_feed_gap(
                 xt_date = datetime.fromisoformat(xt.get("Date", "").replace("Z", "+00:00"))
             except (ValueError, TypeError):
                 continue
-            xt_desc = (xt.get("Reference") or xt.get("BankAccount", {}).get("Name", "") or "").lower()
+            # Counterparty name lives in Contact.Name for bank-feed transactions
+            # (Reference is typically empty, BankAccount.Name is just "Mercury Checking").
+            xt_desc = (
+                xt.get("Reference")
+                or xt.get("Contact", {}).get("Name", "")
+                or xt.get("BankAccount", {}).get("Name", "")
+                or ""
+            ).lower()
 
             # 3-way match: amount (within $0.01), date (within window), counterparty
             amount_match = abs(mt_amount - xt_amount) <= Decimal("0.01")
@@ -563,7 +573,7 @@ def check_xero_feed_gap(
             f"have Xero matches"
         )
     else:
-        gap_total = sum(t.get("amount", 0) for t in feed_gaps)
+        gap_total = sum(t.get("amount", 0) for t in feed_gaps)  # Mercury amounts are in dollars
         summary = (
             f"Xero FEED GAP: {len(feed_gaps)} Mercury transaction(s) absent from Xero "
             f"(total ${abs(gap_total):.2f})"
@@ -580,7 +590,7 @@ def check_xero_feed_gap(
         for g in feed_gaps:
             detail_lines.append(
                 f"  {str(g.get('postedAt','?'))[:10]}  "
-                f"${abs(g.get('amount',0)):.2f}  "
+                f"${abs(g.get('amount',0)):.2f}  "  # Mercury amounts are in dollars
                 f"{g.get('counterpartyName','?')}  "
                 f"[{g.get('bankDescription','')}]"
             )
