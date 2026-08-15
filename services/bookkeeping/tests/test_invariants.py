@@ -596,6 +596,88 @@ class TestXeroFeedGap:
         assert result.passed is True
         assert "PASSED" in result.summary
 
+    def test_feed_gap_batch_import_desc_date(self):
+        """Batch-imported Xero rows stamped with import date but true date in Description → match on desc date."""
+        result = check_xero_feed_gap(
+            mercury_txns=[
+                {
+                    "status": "sent",
+                    "amount": -44.20,  # FIGMA June txn
+                    "postedAt": "2026-06-02T10:00:00Z",
+                    "bankDescription": "FIGMA Jun",
+                    "counterpartyName": "FIGMA",
+                },
+            ],
+            xero_bank_txns=[
+                {
+                    "Total": 44.20,
+                    # Raw Date is the batch *import* date (all rows 06-01), not the true txn date.
+                    "Date": "2026-06-01T00:00:00",
+                    "Description": "FIGMA 2026-06-02 (FON-84 reconciliation, Mercury API verified)",
+                    "Reference": "FIGMA Jun",
+                },
+            ],
+            entity="FON",
+        )
+        assert result.passed is True
+        assert "PASSED" in result.summary
+
+    def test_feed_gap_desc_date_ignored_when_far_away(self):
+        """Description date outside the window must still fail — the desc date is authoritative."""
+        result = check_xero_feed_gap(
+            mercury_txns=[
+                {
+                    "status": "sent",
+                    "amount": -44.20,
+                    "postedAt": "2026-06-02T10:00:00Z",
+                    "bankDescription": "FIGMA Jun",
+                    "counterpartyName": "FIGMA",
+                },
+            ],
+            xero_bank_txns=[
+                {
+                    "Total": 44.20,
+                    "Date": "2026-06-01T00:00:00",
+                    "Description": "FIGMA 2026-01-06 (prior period, not June)",  # outside window
+                    "Reference": "FIGMA Jun",
+                },
+            ],
+            entity="FON",
+        )
+        assert result.passed is False
+        assert "FEED GAP" in result.summary
+
+    def test_feed_gap_jan_pollution_not_consuming_june_match(self):
+        """A Jan-pollution Xero row must not steal the match for a real June txn of the same amount."""
+        result = check_xero_feed_gap(
+            mercury_txns=[
+                {
+                    "status": "sent",
+                    "amount": -20.40,
+                    "postedAt": "2026-06-05T10:00:00Z",
+                    "bankDescription": "FIGMA",
+                    "counterpartyName": "FIGMA",
+                },
+            ],
+            xero_bank_txns=[
+                {
+                    "Total": 20.40,
+                    "Date": "2026-06-01T00:00:00",
+                    "Description": "FIGMA 2026-01-06 (FON-84 reconciliation, Mercury API verified)",  # Jan pollution
+                    "Reference": "FIGMA",
+                },
+                {
+                    "Total": 20.40,
+                    "Date": "2026-06-01T00:00:00",
+                    "Description": "FIGMA 2026-06-05 (FON-84 reconciliation, Mercury API verified)",
+                    "Reference": "FIGMA",
+                },
+            ],
+            entity="FON",
+        )
+        assert result.passed is True
+        assert "PASSED" in result.summary
+
     def test_feed_gap_in_run_all_invariants(self):
         """INV10 is included in run_all_invariants when both lists provided."""
         report = run_all_invariants(
