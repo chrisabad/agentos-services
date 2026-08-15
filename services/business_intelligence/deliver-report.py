@@ -25,6 +25,15 @@ amplitude_key = get_secret("agentos/fon/amplitude_api_key")
 amplitude_secret = get_secret("agentos/fon/amplitude_secret_key")
 slack_token = get_secret("agentos/juno/slack_bot_token")
 
+# ── Idempotency guard (FON-117) ──
+# Post each daily report at most once per period date per Slack channel.
+# Sentinel markers live under a SHARED directory so the repo copy and the
+# live cron copy dedupe against each other (a per-copy sentinel would still
+# allow one post from each). The cron executor runs as `node`, which owns
+# /opt/hermes-profiles/juno/state/, so it is writable by both copies.
+DELIVERED_DIR = "/opt/hermes-profiles/juno/state/delivered"
+SLACK_CHANNEL = "D0BJ70DL739"
+
 # ── Run toolkit ──
 env = os.environ.copy()
 env["LEMONSQUEEZY_API_KEY"] = ls_key
@@ -152,7 +161,7 @@ report_text = "\n".join(lines)
 
 # ── Deliver to Slack DM (Keona) ──
 slack_payload = {
-    "channel": "D0BJ70DL739",
+    "channel": SLACK_CHANNEL,
     "text": f"📊 FON Daily BI Report — {report['period']['date']}",
     "blocks": [
         {
@@ -314,21 +323,37 @@ slack_payload["blocks"].append({
     "text": {"type": "mrkdwn", "text": "*Data Sources*\n" + "\n".join(src_lines)}
 })
 
-# Post to Slack
-req = urllib.request.Request(
-    "https://slack.com/api/chat.postMessage",
-    data=json.dumps(slack_payload).encode(),
-    headers={
-        "Authorization": f"Bearer {slack_token}",
-        "Content-Type": "application/json"
-    },
-    method="POST"
-)
-resp = urllib.request.urlopen(req)
-slack_result = json.loads(resp.read())
-print(f"Slack delivery: {'OK' if slack_result.get('ok') else 'FAILED'}")
-if not slack_result.get("ok"):
-    print(f"  Error: {slack_result.get('error')}")
+# ── Post to Slack (guarded — at most once per date per channel) ──
+report_date = report["period"]["date"]
+marker = os.path.join(DELIVERED_DIR, f"{report_date}__{SLACK_CHANNEL}")
+
+already_delivered = os.path.exists(marker)
+if already_delivered:
+    print(f"Slack delivery: SKIPPED (already delivered for {report_date} to {SLACK_CHANNEL})")
+else:
+    req = urllib.request.Request(
+        "https://slack.com/api/chat.postMessage",
+        data=json.dumps(slack_payload).encode(),
+        headers={
+            "Authorization": f"Bearer {slack_token}",
+            "Content-Type": "application/json"
+        },
+        method="POST"
+    )
+    resp = urllib.request.urlopen(req)
+    slack_result = json.loads(resp.read())
+    print(f"Slack delivery: {'OK' if slack_result.get('ok') else 'FAILED'}")
+    if not slack_result.get("ok"):
+        print(f"  Error: {slack_result.get('error')}")
+    else:
+        # Only record the sentinel after a confirmed successful post, so a
+        # failed post is not treated as delivered.
+        try:
+            os.makedirs(DELIVERED_DIR, exist_ok=True)
+            with open(marker, "w") as f:
+                f.write(f"delivered {report_date} to {SLACK_CHANNEL}\n")
+        except OSError as e:
+            print(f"  WARN: could not write idempotency sentinel {marker}: {e}")
 
 # ── Also print to stdout for Paperclip comment ──
 print()
