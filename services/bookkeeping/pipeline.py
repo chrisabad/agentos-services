@@ -349,6 +349,7 @@ def _run_xero_entity(
                     "Date": t.date.isoformat(),
                     "Type": t.type,
                     "Reference": t.reference,
+                    "Description": t.description,
                     "IsReconciled": t.is_reconciled,
                     "Contact": {"Name": t.contact_name} if t.contact_name else None,
                     "BankAccount": {"Name": t.account_name} if t.account_name else None,

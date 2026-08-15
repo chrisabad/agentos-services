@@ -12,7 +12,9 @@ agent to diagnose.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -485,6 +487,41 @@ def check_prior_month_closed(
     )
 
 
+def _parse_effective_xero_date(description: str, raw_date: str) -> Optional[datetime]:
+    """
+    Return the effective transaction date for a Xero bank-feed transaction.
+
+    Bank-feed transactions may be batch-imported with every row stamped with
+    the *import* date (e.g. 2026-06-01) rather than the true transaction date.
+    The authoritative true date is embedded in the Description field, e.g.
+    "FIGMA 2026-06-02 (FON-84 reconciliation, Mercury API verified)". Prefer
+    that date; fall back to the raw Date field when no description date exists.
+
+    Returns an offset-naive datetime, or None if no usable date can be found.
+    """
+    from datetime import datetime
+
+    # Look for the first YYYY-MM-DD in the description.
+    date_match = _DATE_IN_DESC_RE.search(description or "")
+    if date_match:
+        try:
+            return datetime.strptime(date_match.group(1), "%Y-%m-%d")
+        except ValueError:
+            pass
+
+    # Fall back to the raw Date field (string like "2026-07-07T00:00:00").
+    try:
+        d = datetime.fromisoformat((raw_date or "").replace("Z", "+00:00"))
+        if d.tzinfo is not None:
+            d = d.replace(tzinfo=None)
+        return d
+    except (ValueError, TypeError):
+        return None
+
+
+_DATE_IN_DESC_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
 def check_xero_feed_gap(
     mercury_txns: List[Dict[str, Any]],
     xero_bank_txns: List[Dict[str, Any]],
@@ -534,11 +571,17 @@ def check_xero_feed_gap(
         matched = False
         for xt in xero_bank_txns:
             xt_amount = Decimal(str(abs(xt.get("Total", 0))))
-            # Xero Date is string like "2026-07-07T00:00:00"
-            try:
-                xt_date = datetime.fromisoformat(xt.get("Date", "").replace("Z", "+00:00"))
-            except (ValueError, TypeError):
+            # Effective Xero transaction date. Bank-feed transactions may be
+            # batch-imported with all rows stamped with the *import* date
+            # (e.g. 2026-06-01) rather than the true transaction date, which
+            # breaks a strict date comparison. The authoritative true date is
+            # embedded in the Description (e.g. "FIGMA 2026-06-02 (FON-84
+            # reconciliation, Mercury API verified)"). Parse it from there and
+            # fall back to the raw Date field when no description date exists.
+            xt_eff_date = _parse_effective_xero_date(xt.get("Description", ""), xt.get("Date", ""))
+            if xt_eff_date is None:
                 continue
+
             # Counterparty name lives in Contact.Name for bank-feed transactions
             # (Reference is typically empty, BankAccount.Name is just "Mercury Checking").
             xt_desc = (
@@ -550,7 +593,7 @@ def check_xero_feed_gap(
 
             # 3-way match: amount (within $0.01), date (within window), counterparty
             amount_match = abs(mt_amount - xt_amount) <= Decimal("0.01")
-            date_diff = abs((mt_date - xt_date).days)
+            date_diff = abs((mt_date - xt_eff_date).days)
             date_match = date_diff <= date_window_days
             # Counterparty: check if Mercury description appears in Xero description
             # or vice versa (case-insensitive). Split on common delimiters.
